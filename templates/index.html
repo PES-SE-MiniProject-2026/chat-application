@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flask Real-Time Chat Test</title>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  </head>
+  <body>
+    <h1>Real-Time Chat Test</h1>
+
+    <label for="username">Username:</label>
+    <input id="username" value="User1" maxlength="30" />
+
+    <ul id="messages"></ul>
+
+    <form id="message-form">
+      <input
+        id="message-input"
+        placeholder="Type a message..."
+        maxlength="1000"
+        required
+      />
+      <button type="submit">Send</button>
+    </form>
+
+    <script>
+      const socket = io();
+
+      const form = document.getElementById("message-form");
+      const input = document.getElementById("message-input");
+      const username = document.getElementById("username");
+      const messages = document.getElementById("messages");
+
+      socket.on("connect", () => {
+        console.log("Connected to Flask-SocketIO:", socket.id);
+      });
+
+      socket.on("disconnect", () => {
+        console.log("Disconnected from server");
+      });
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+
+        const text = input.value.trim();
+        if (!text) return;
+
+        socket.emit("chat message", {
+          username: username.value.trim() || "Guest",
+          text: text,
+        });
+
+        input.value = "";
+      });
+
+      socket.on("chat message", (message) => {
+        const item = document.createElement("li");
+        item.textContent = `${message.username}: ${message.text}`;
+        messages.appendChild(item);
+      });
+    </script>
+  </body>
+</html>

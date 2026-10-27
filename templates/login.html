@@ -1,0 +1,30 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login</title>
+</head>
+<body>
+  <h1>Login to Chat</h1>
+
+  {% for category, message in get_flashed_messages(with_categories=true) %}
+    <p role="alert">{{ message }}</p>
+  {% endfor %}
+
+  <form method="POST" action="{{ url_for('login') }}">
+    <label for="username_or_email">Username or Email</label><br>
+    <input id="username_or_email" name="username_or_email"
+           required autocomplete="username"><br><br>
+
+    <label for="password">Password</label><br>
+    <input id="password" name="password" type="password"
+           required autocomplete="current-password"><br><br>
+
+    <button type="submit">Login</button>
+  </form>
+
+  <p>New user? <a href="{{ url_for('register') }}">Create an account</a></p>
+</body>
+</html>

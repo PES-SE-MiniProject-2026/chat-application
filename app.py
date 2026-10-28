@@ -28,30 +28,40 @@ limiter = Limiter(
 
 # Set CHAT_SECRET_KEY in your environment before deployment.
 app.config["SECRET_KEY"] = os.environ.get(
-    "CHAT_SECRET_KEY", "development-only-change-this-key"
-# ---------------------------------------------------------------------------
+    "CHAT_SECRET_KEY",
+    DEFAULT_SECRET,
+)
+
 # Configuration (CHAT-SR-001: secure transport)
-# ---------------------------------------------------------------------------
 DEFAULT_SECRET = "development-only-change-this-key"
 DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
 BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
 HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")
 HTTPS_PORT = int(os.environ.get("CHAT_HTTPS_PORT", "5000"))
 HTTP_REDIRECT_PORT = int(os.environ.get("CHAT_HTTP_PORT", "5080"))
+
 CERT_FILE = os.environ.get(
-    "CHAT_CERT_FILE", os.path.join(app.root_path, "certs", "cert.pem")
+    "CHAT_CERT_FILE",
+    os.path.join(app.root_path, "certs", "cert.pem"),
 )
 KEY_FILE = os.environ.get(
-    "CHAT_KEY_FILE", os.path.join(app.root_path, "certs", "key.pem")
+    "CHAT_KEY_FILE",
+    os.path.join(app.root_path, "certs", "key.pem"),
 )
 ALLOWED_ORIGINS = os.environ.get(
     "CHAT_ALLOWED_ORIGINS",
     f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
 ).split(",")
 
-app.config["SECRET_KEY"] = os.environ.get("CHAT_SECRET_KEY", DEFAULT_SECRET)
+app.config["SECRET_KEY"] = os.environ.get(
+    "CHAT_SECRET_KEY",
+    DEFAULT_SECRET,
+)
+
 if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
     raise RuntimeError("Set CHAT_SECRET_KEY before running in production.")
+
+
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"

@@ -6,84 +6,88 @@
     <title>Real-Time Chat</title>
 
     <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
-
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        max-width: 850px;
-        margin: 2rem auto;
-        padding: 0 1rem;
-      }
-
-      input {
-        padding: 0.45rem;
-        margin: 0.25rem 0;
-      }
-
-      #messages {
-        border: 1px solid #ccc;
-        border-radius: 8px;
-        min-height: 180px;
-        max-height: 350px;
-        overflow-y: auto;
-        padding: 1rem 2rem;
-      }
-
-      .status {
-        color: #666;
-        font-size: 0.85rem;
-        margin-left: 0.4rem;
-      }
-
-      #notice,
-      #typing-indicator {
-        min-height: 1.2rem;
-      }
-
-      #notice {
-        color: #a33;
-      }
-
-      #typing-indicator {
-        color: #666;
-        font-style: italic;
-      }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
   </head>
 
   <body>
-    <h1>Real-Time Chat</h1>
+    <div class="chat-app">
+      <!-- App Header -->
+      <header class="chat-header">
+        <div class="brand-section">
+          <div class="brand-icon" aria-hidden="true">&#128172;</div>
+          <div>
+            <h1 class="brand-title">Real-Time Chat</h1>
+            <p class="brand-subtitle">Software Engineering Mini-Project</p>
+          </div>
+        </div>
 
-    <p>Welcome, <strong>{{ username }}</strong>!</p>
+        <div class="user-nav-section">
+          <div class="user-badge" id="user-badge" title="Active Session">
+            <span class="status-dot connecting" id="connection-dot" aria-hidden="true"></span>
+            <span>Logged in as <strong>{{ username }}</strong></span>
+          </div>
 
-    <form method="POST" action="{{ url_for('logout') }}">
-      <button type="submit">Logout</button>
-    </form>
+          <form method="POST" action="{{ url_for('logout') }}">
+            <button type="submit" class="btn btn-danger-outline" aria-label="Log out of application">
+              Logout
+            </button>
+          </form>
+        </div>
+      </header>
 
-    <hr />
+      <!-- Main Chat Card -->
+      <main class="chat-main-card">
+        <!-- Recipient Bar -->
+        <div class="recipient-toolbar">
+          <label for="recipient">Chat with:</label>
+          <div class="recipient-input-wrapper">
+            <input
+              id="recipient"
+              name="recipient"
+              maxlength="30"
+              required
+              placeholder="Enter recipient username..."
+              autocomplete="off"
+            />
+          </div>
+        </div>
 
-    <label for="recipient">Send to username:</label>
-    <input
-      id="recipient"
-      maxlength="30"
-      required
-      placeholder="Recipient username"
-    />
+        <!-- Feedback & Status Bar -->
+        <div class="chat-feedback-bar" role="region" aria-label="Chat status notices">
+          <p id="notice" role="status" aria-live="polite"></p>
+          <p id="typing-indicator" aria-live="polite"></p>
+        </div>
 
-    <p id="typing-indicator" aria-live="polite"></p>
-    <p id="notice" role="status" aria-live="polite"></p>
+        <!-- Scrollable Messages Area -->
+        <div class="messages-container" id="messages-container" role="region" aria-label="Message history">
+          <div id="messages-empty" class="empty-state">
+            <div class="empty-state-icon" aria-hidden="true">&#128172;</div>
+            <p class="empty-state-title">No messages yet</p>
+            <p class="empty-state-text">Enter a recipient username above and send a message to start conversing in real time.</p>
+          </div>
 
-    <ul id="messages"></ul>
+          <ul id="messages" role="log" aria-live="polite"></ul>
+        </div>
 
-    <form id="message-form">
-      <input
-        id="message-input"
-        placeholder="Type a message..."
-        maxlength="1000"
-        required
-      />
-      <button type="submit">Send</button>
-    </form>
+        <!-- Composer Area -->
+        <footer class="chat-composer">
+          <form id="message-form" autocomplete="off">
+            <label for="message-input" class="sr-only">Type a message</label>
+            <input
+              id="message-input"
+              name="message-text"
+              placeholder="Type a message..."
+              maxlength="1000"
+              required
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn-primary" id="send-button">
+              Send
+            </button>
+          </form>
+        </footer>
+      </main>
+    </div>
 
     <script>
       // CHAT-SR-003: the auth callback runs on every connect and
@@ -114,11 +118,14 @@
 
       const form = document.getElementById("message-form");
       const input = document.getElementById("message-input");
+      const sendButton = document.getElementById("send-button");
       const recipient = document.getElementById("recipient");
       const messages = document.getElementById("messages");
+      const messagesContainer = document.getElementById("messages-container");
+      const emptyState = document.getElementById("messages-empty");
       const notice = document.getElementById("notice");
-      const typingIndicator =
-        document.getElementById("typing-indicator");
+      const typingIndicator = document.getElementById("typing-indicator");
+      const connectionDot = document.getElementById("connection-dot");
 
       const currentUsername = {{ username | tojson }};
       const loginUrl = {{ url_for('login') | tojson }};
@@ -165,10 +172,19 @@
       socket.on("connect", () => {
         console.log("Connected to Flask-SocketIO:", socket.id);
         notice.textContent = "";
+        if (connectionDot) {
+          connectionDot.className = "status-dot";
+          connectionDot.parentElement.title = "Connected to chat server";
+        }
         flushReadReceipts();
       });
 
       socket.on("connect_error", (err) => {
+        if (connectionDot) {
+          connectionDot.className = "status-dot connecting";
+          connectionDot.parentElement.title = "Connection error";
+        }
+
         // The server refuses unauthenticated handshakes with the generic
         // reason "unauthorized": send the user back to the login page.
         if (err && err.message === "unauthorized") {
@@ -182,6 +198,11 @@
       });
 
       socket.on("disconnect", (reason) => {
+        if (connectionDot) {
+          connectionDot.className = "status-dot offline";
+          connectionDot.parentElement.title = "Disconnected";
+        }
+
         notice.textContent =
           reason === "io server disconnect"
             ? "You were disconnected. Please log in again."
@@ -189,6 +210,9 @@
       });
 
       socket.io.on("reconnect_failed", () => {
+        if (connectionDot) {
+          connectionDot.className = "status-dot offline";
+        }
         notice.textContent =
           "Could not reconnect. Please refresh the page.";
       });
@@ -206,32 +230,50 @@
           return;
         }
 
+        if (emptyState) {
+          emptyState.style.display = "none";
+        }
+
         const item = document.createElement("li");
+        item.className = `message-item ${isOwn ? "message-outgoing" : "message-incoming"}`;
 
         if (messageId) {
           item.dataset.messageId = messageId;
           renderedMessages.add(messageId);
         }
 
-        const body = document.createElement("span");
+        const bubble = document.createElement("div");
+        bubble.className = "message-bubble";
 
-        body.textContent =
-          `${isOwn ? "You" : message.username}: ${message.text}`;
+        const header = document.createElement("div");
+        header.className = "message-header";
 
-        item.appendChild(body);
+        const senderSpan = document.createElement("span");
+        senderSpan.className = "message-sender";
+        senderSpan.textContent = isOwn ? "You" : (message.username || "User");
+        header.appendChild(senderSpan);
+        bubble.appendChild(header);
+
+        const textDiv = document.createElement("div");
+        textDiv.className = "message-text";
+        textDiv.textContent = message.text;
+        bubble.appendChild(textDiv);
 
         if (isOwn && messageId) {
-          const status = document.createElement("span");
+          const metaDiv = document.createElement("div");
+          metaDiv.className = "message-meta";
 
+          const status = document.createElement("span");
           status.className = "status";
           status.dataset.statusFor = messageId;
 
           const pendingStatus = pendingStatuses.get(messageId);
+          const currentStatus = pendingStatus || message.status || "sent";
+          status.dataset.status = currentStatus;
+          status.textContent = `(${currentStatus})`;
 
-          status.textContent =
-            `(${pendingStatus || message.status || "sent"})`;
-
-          item.appendChild(status);
+          metaDiv.appendChild(status);
+          bubble.appendChild(metaDiv);
 
           ownMessages.set(messageId, status);
 
@@ -241,7 +283,12 @@
           }
         }
 
+        item.appendChild(bubble);
         messages.appendChild(item);
+
+        if (messagesContainer) {
+          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
         messages.scrollTop = messages.scrollHeight;
 
         // Incoming messages are queued as unread and only reported
@@ -258,13 +305,27 @@
         const text = input.value.trim();
         const to = recipient.value.trim();
 
-        if (!text || !to) {
-          notice.textContent =
-            "Enter a recipient username and a message.";
+        if (!to) {
+          notice.textContent = "Please enter a recipient username.";
+          recipient.focus();
+          return;
+        }
+
+        if (!text) {
+          notice.textContent = "Please enter a message to send.";
+          input.focus();
           return;
         }
 
         notice.textContent = "";
+
+        // Temporarily disable the button to avoid accidental duplicate submissions
+        if (sendButton) {
+          sendButton.disabled = true;
+          setTimeout(() => {
+            sendButton.disabled = false;
+          }, 200);
+        }
 
         socket.emit("typing", {
           recipient: to,
@@ -339,6 +400,7 @@
 
         if (status) {
           status.textContent = `(${update.status})`;
+          status.dataset.status = update.status;
         } else {
           // Save the update until its message is rendered.
           pendingStatuses.set(messageId, update.status);

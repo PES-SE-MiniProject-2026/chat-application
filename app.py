@@ -26,14 +26,17 @@ limiter = Limiter(
     storage_uri="memory://",
 )
 
+
 # Set CHAT_SECRET_KEY in your environment before deployment.
+DEFAULT_SECRET = "development-only-change-this-key"
+
 app.config["SECRET_KEY"] = os.environ.get(
     "CHAT_SECRET_KEY",
     DEFAULT_SECRET,
 )
 
 # Configuration (CHAT-SR-001: secure transport)
-DEFAULT_SECRET = "development-only-change-this-key"
+
 DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
 BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
 HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")

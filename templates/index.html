@@ -1,59 +1,330 @@
-
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Real-Time Chat</title>
-  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
-</head>
-<body>
-  <h1>Real-Time Chat</h1>
-  <p>Welcome, <strong>{{ username }}</strong>!</p>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Real-Time Chat</title>
 
-  <form method="POST" action="{{ url_for('logout') }}">
-    <button type="submit">Logout</button>
-  </form>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 
-  <hr>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 850px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
 
-  <ul id="messages"></ul>
+      input {
+        padding: 0.45rem;
+        margin: 0.25rem 0;
+      }
 
-  <form id="message-form">
-    <input id="message-input" placeholder="Type a message..."
-           maxlength="1000" required>
-    <button type="submit">Send</button>
-  </form>
+      #messages {
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        min-height: 180px;
+        max-height: 350px;
+        overflow-y: auto;
+        padding: 1rem 2rem;
+      }
 
-  <script>
-    const socket = io();
-    const form = document.getElementById("message-form");
-    const input = document.getElementById("message-input");
-    const messages = document.getElementById("messages");
+      .status {
+        color: #666;
+        font-size: 0.85rem;
+        margin-left: 0.4rem;
+      }
 
-    socket.on("connect", () => {
-      console.log("Connected to Flask-SocketIO:", socket.id);
-    });
+      #notice,
+      #typing-indicator {
+        min-height: 1.2rem;
+      }
 
-    socket.on("disconnect", () => {
-      console.log("Disconnected from server");
-    });
+      #notice {
+        color: #a33;
+      }
 
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+      #typing-indicator {
+        color: #666;
+        font-style: italic;
+      }
+    </style>
+  </head>
 
-      const text = input.value.trim();
-      if (!text) return;
+  <body>
+    <h1>Real-Time Chat</h1>
 
-      socket.emit("chat message", { text });
-      input.value = "";
-    });
+    <p>Welcome, <strong>{{ username }}</strong>!</p>
 
-    socket.on("chat message", (message) => {
-      const item = document.createElement("li");
-      item.textContent = `${message.username}: ${message.text}`;
-      messages.appendChild(item);
-    });
-  </script>
-</body>
+    <form method="POST" action="{{ url_for('logout') }}">
+      <button type="submit">Logout</button>
+    </form>
+
+    <hr />
+
+    <label for="recipient">Send to username:</label>
+    <input
+      id="recipient"
+      maxlength="30"
+      required
+      placeholder="Recipient username"
+    />
+
+    <p id="typing-indicator" aria-live="polite"></p>
+    <p id="notice" role="status" aria-live="polite"></p>
+
+    <ul id="messages"></ul>
+
+    <form id="message-form">
+      <input
+        id="message-input"
+        placeholder="Type a message..."
+        maxlength="1000"
+        required
+      />
+      <button type="submit">Send</button>
+    </form>
+
+    <script>
+       const socket = io({ secure: true, reconnectionAttempts: 5 });
+
+       const form = document.getElementById("message-form");
+       const input = document.getElementById("message-input");
+       const recipient = document.getElementById("recipient");
+       const messages = document.getElementById("messages");
+       const notice = document.getElementById("notice");
+       const typingIndicator =
+         document.getElementById("typing-indicator");
+
+       const currentUsername = {{ username | tojson }};
+
+       // Outgoing message ID -> status element.
+       const ownMessages = new Map();
+
+       // Status events received before their message is rendered.
+       const pendingStatuses = new Map();
+
+       // Prevent duplicate rendering.
+       const renderedMessages = new Set();
+
+       // Incoming message IDs that have been rendered but not yet
+       // reported as read (because the chat window wasn't being viewed).
+       const unreadIncoming = new Set();
+
+       let typingTimer;
+
+       // The chat counts as "viewed" only when this tab is visible
+       // AND the browser window has focus.
+       function isChatViewed() {
+         return document.visibilityState === "visible" &&
+                document.hasFocus();
+       }
+
+       // Send read receipts for all pending incoming messages,
+       // but only if the user is actually looking at the chat.
+       function flushReadReceipts() {
+         if (!isChatViewed() || unreadIncoming.size === 0) {
+           return;
+         }
+
+         for (const id of unreadIncoming) {
+           socket.emit("message read", { message_id: Number(id) });
+         }
+
+         unreadIncoming.clear();
+       }
+
+       document.addEventListener("visibilitychange", flushReadReceipts);
+       window.addEventListener("focus", flushReadReceipts);
+
+       socket.on("connect", () => {
+         console.log("Connected to Flask-SocketIO:", socket.id);
+         notice.textContent = "";
+         flushReadReceipts();
+       });
+
+       socket.on("connect_error", () => {
+         // Generic message only; no technical details shown to the user.
+       notice.textContent =
+         "Secure connection failed. Please refresh or log in again.";
+      });
+
+       socket.on("disconnect", (reason) => {
+             notice.textContent =
+             reason === "io server disconnect"
+             ? "You were disconnected. Please log in again."
+             : "Connection lost. Reconnecting…";
+       });
+       socket.io.on("reconnect_failed", () => {
+             notice.textContent =
+             "Could not reconnect. Please refresh the page.";
+       });
+
+       function addMessage(message, isOwn) {
+         if (!message || typeof message.text !== "string") {
+           return;
+         }
+
+         const messageId =
+           message.id != null ? String(message.id) : null;
+
+         // Avoid rendering the same message more than once.
+         if (messageId && renderedMessages.has(messageId)) {
+           return;
+         }
+
+         const item = document.createElement("li");
+
+         if (messageId) {
+           item.dataset.messageId = messageId;
+           renderedMessages.add(messageId);
+         }
+
+         const body = document.createElement("span");
+
+         body.textContent =
+           `${isOwn ? "You" : message.username}: ${message.text}`;
+
+         item.appendChild(body);
+
+         if (isOwn && messageId) {
+           const status = document.createElement("span");
+
+           status.className = "status";
+           status.dataset.statusFor = messageId;
+
+           const pendingStatus = pendingStatuses.get(messageId);
+
+           status.textContent =
+             `(${pendingStatus || message.status || "sent"})`;
+
+           item.appendChild(status);
+
+           ownMessages.set(messageId, status);
+
+           // Apply any status event received before this message.
+           if (pendingStatus) {
+             pendingStatuses.delete(messageId);
+           }
+         }
+
+         messages.appendChild(item);
+         messages.scrollTop = messages.scrollHeight;
+
+         // Incoming messages are queued as unread and only reported
+         // as read once the chat window is actually being viewed.
+         if (!isOwn && messageId) {
+           unreadIncoming.add(messageId);
+           flushReadReceipts();
+         }
+       }
+
+       form.addEventListener("submit", (event) => {
+         event.preventDefault();
+
+         const text = input.value.trim();
+         const to = recipient.value.trim();
+
+         if (!text || !to) {
+           notice.textContent =
+             "Enter a recipient username and a message.";
+           return;
+         }
+
+         notice.textContent = "";
+
+         socket.emit("typing", {
+           recipient: to,
+           is_typing: false
+         });
+
+         socket.emit("chat message", {
+           recipient: to,
+           text: text
+         });
+
+         input.value = "";
+         input.focus();
+       });
+
+       input.addEventListener("input", () => {
+         const to = recipient.value.trim();
+
+         if (!to) return;
+
+         socket.emit("typing", {
+           recipient: to,
+           is_typing: input.value.length > 0
+         });
+
+         clearTimeout(typingTimer);
+
+         typingTimer = setTimeout(() => {
+           socket.emit("typing", {
+             recipient: to,
+             is_typing: false
+           });
+         }, 1200);
+       });
+
+       input.addEventListener("blur", () => {
+         const to = recipient.value.trim();
+
+         if (to) {
+           socket.emit("typing", {
+             recipient: to,
+             is_typing: false
+           });
+         }
+       });
+
+       // Our own outgoing message.
+       socket.on("message sent", (message) => {
+         addMessage(message, true);
+       });
+
+       // Message received from another user.
+       socket.on("chat message", (message, acknowledge) => {
+         // Acknowledge delivery first. Read is decided separately.
+         if (typeof acknowledge === "function") {
+           acknowledge({ received: true });
+         }
+
+         addMessage(message, false);
+       });
+
+       // Delivery and read receipt updates.
+       socket.on("message status", (update) => {
+         if (!update || update.message_id == null) {
+           return;
+         }
+
+         const messageId = String(update.message_id);
+         const status = ownMessages.get(messageId);
+
+         console.log("Message status update:", update);
+
+         if (status) {
+           status.textContent = `(${update.status})`;
+         } else {
+           // Save the update until its message is rendered.
+           pendingStatuses.set(messageId, update.status);
+         }
+       });
+
+       socket.on("chat error", (error) => {
+         notice.textContent =
+           error.message || "Unable to send message.";
+       });
+
+       socket.on("typing", (event) => {
+         if (event.is_typing) {
+           typingIndicator.textContent =
+             `${event.username} is typing…`;
+         } else {
+           typingIndicator.textContent = "";
+         }
+       });
+    </script>
+  </body>
 </html>

@@ -11,9 +11,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flask import (
-    Flask, render_template, request, redirect, url_for, session, flash
+    Flask, render_template, request, redirect, url_for, session, flash,
+    jsonify,
 )
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import (
+    SocketIO, emit, join_room, ConnectionRefusedError,
+)
+from itsdangerous import URLSafeTimedSerializer, BadSignature
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -56,14 +60,8 @@ ALLOWED_ORIGINS = os.environ.get(
     f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
 ).split(",")
 
-app.config["SECRET_KEY"] = os.environ.get(
-    "CHAT_SECRET_KEY",
-    DEFAULT_SECRET,
-)
-
 if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
     raise RuntimeError("Set CHAT_SECRET_KEY before running in production.")
-
 
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -72,6 +70,35 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = True
 
 DATABASE = os.path.join(app.root_path, "users.db")
+
+# ---------------------------------------------------------------------------
+# WebSocket authentication tokens (CHAT-SR-003)
+# ---------------------------------------------------------------------------
+# A short-lived signed token is issued to logged-in users by /ws-token and
+# must be presented in the Socket.IO handshake. The client fetches a fresh
+# token on every connect/reconnect, so a short lifetime is enough.
+WS_TOKEN_MAX_AGE = 60  # seconds
+ws_serializer = URLSafeTimedSerializer(
+    app.config["SECRET_KEY"],
+    salt="chat-ws-auth",
+)
+
+
+def issue_ws_token(user_id):
+    return ws_serializer.dumps({"uid": user_id})
+
+
+def verify_ws_token(token):
+    """Return the user id inside a valid, unexpired token, otherwise None."""
+    if not isinstance(token, str) or not token or len(token) > 512:
+        return None
+    try:
+        data = ws_serializer.loads(token, max_age=WS_TOKEN_MAX_AGE)
+    except BadSignature:  # also covers SignatureExpired
+        return None
+    uid = data.get("uid") if isinstance(data, dict) else None
+    return uid if isinstance(uid, int) else None
+
 
 # Only pages served from these HTTPS origins may open a Socket.IO connection.
 socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS)
@@ -215,6 +242,19 @@ def index():
     return render_template("index.html", username=session["username"])
 
 
+@app.route("/ws-token")
+@limiter.limit("30 per minute")
+def ws_token():
+    """Issue a short-lived WebSocket handshake token to a logged-in user."""
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify(error="unauthorized"), 401
+
+    response = jsonify(token=issue_ws_token(user_id))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
@@ -232,7 +272,6 @@ def register():
             flash("Enter a valid email address.", "error")
             return render_template("register.html")
 
-        
         if len(password) < 12 or len(password) > 128:
             flash(
                 "Password must be between 12 and 128 characters.",
@@ -254,7 +293,6 @@ def register():
             )
             return render_template("register.html")
 
-
         password_hash = generate_password_hash(password)
         try:
             with get_db() as db:
@@ -270,6 +308,7 @@ def register():
         flash("Account created successfully. Please log in.", "success")
         return redirect(url_for("login"))
     return render_template("register.html")
+
 
 @app.route("/login", methods=["GET", "POST"])
 @limiter.limit("5 per minute", methods=["POST"])
@@ -395,10 +434,28 @@ def handle_connect(auth=None):
         print("Rejected insecure Socket.IO connection")
         return False
 
-    user_id = session.get("user_id")
-    if not user_id:
-        return False
+    # CHAT-SR-003: a valid, unexpired token is required for the handshake,
+    # and it must belong to the currently logged-in session.
+    token = auth.get("token") if isinstance(auth, dict) else None
+    token_uid = verify_ws_token(token)
+    session_uid = session.get("user_id")
 
+    if token_uid is None or session_uid is None or token_uid != session_uid:
+        app.logger.warning("Rejected unauthenticated Socket.IO handshake")
+        # Generic reason only; no detail about why it failed.
+        raise ConnectionRefusedError("unauthorized")
+
+    with get_db() as db:
+        user_exists = db.execute(
+            "SELECT 1 FROM users WHERE id = ?", (token_uid,)
+        ).fetchone()
+
+    if user_exists is None:
+        app.logger.warning("Rejected Socket.IO handshake for unknown user")
+        raise ConnectionRefusedError("unauthorized")
+
+    # Associate this connection with the verified user.
+    user_id = token_uid
     sid = request.sid
     sid_to_user[sid] = user_id
     join_room(user_room(user_id))
@@ -445,7 +502,8 @@ def handle_disconnect(reason=None):
 
 @socketio.on("chat message")
 def handle_chat_message(data):
-    sender_id = session.get("user_id")
+    # Identity comes from the authenticated connection, never the payload.
+    sender_id = sid_to_user.get(request.sid)
     if not sender_id or not isinstance(data, dict):
         return
 
@@ -493,7 +551,7 @@ def handle_chat_message(data):
 
 @socketio.on("message read")
 def handle_message_read(data):
-    reader_id = session.get("user_id")
+    reader_id = sid_to_user.get(request.sid)
     print("READ EVENT RECEIVED:", data, "reader:", reader_id)
 
     if not reader_id or not isinstance(data, dict):
@@ -534,7 +592,7 @@ def handle_message_read(data):
 
 @socketio.on("typing")
 def handle_typing(data):
-    sender_id = session.get("user_id")
+    sender_id = sid_to_user.get(request.sid)
     if not sender_id or not isinstance(data, dict):
         return
 
@@ -545,11 +603,15 @@ def handle_typing(data):
             "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
             (recipient_username,),
         ).fetchone()
+        sender = db.execute(
+            "SELECT username FROM users WHERE id = ?",
+            (sender_id,),
+        ).fetchone()
 
-    if recipient and recipient["id"] != sender_id:
+    if recipient and sender and recipient["id"] != sender_id:
         emit(
             "typing",
-            {"username": session["username"], "is_typing": is_typing},
+            {"username": sender["username"], "is_typing": is_typing},
             to=user_room(recipient["id"]),
         )
 

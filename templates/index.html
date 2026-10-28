@@ -86,245 +86,278 @@
     </form>
 
     <script>
-       const socket = io({ secure: true, reconnectionAttempts: 5 });
+      // CHAT-SR-003: the auth callback runs on every connect and
+      // reconnect, so a fresh short-lived token is always sent in the
+      // WebSocket handshake. If no token can be obtained, an empty auth
+      // object is sent and the server refuses the connection.
+      const socket = io({
+        secure: true,
+        reconnectionAttempts: 5,
+        auth: async (cb) => {
+          try {
+            const res = await fetch("/ws-token", {
+              credentials: "same-origin",
+              cache: "no-store"
+            });
 
-       const form = document.getElementById("message-form");
-       const input = document.getElementById("message-input");
-       const recipient = document.getElementById("recipient");
-       const messages = document.getElementById("messages");
-       const notice = document.getElementById("notice");
-       const typingIndicator =
-         document.getElementById("typing-indicator");
+            if (!res.ok) {
+              throw new Error("unauthorized");
+            }
 
-       const currentUsername = {{ username | tojson }};
-
-       // Outgoing message ID -> status element.
-       const ownMessages = new Map();
-
-       // Status events received before their message is rendered.
-       const pendingStatuses = new Map();
-
-       // Prevent duplicate rendering.
-       const renderedMessages = new Set();
-
-       // Incoming message IDs that have been rendered but not yet
-       // reported as read (because the chat window wasn't being viewed).
-       const unreadIncoming = new Set();
-
-       let typingTimer;
-
-       // The chat counts as "viewed" only when this tab is visible
-       // AND the browser window has focus.
-       function isChatViewed() {
-         return document.visibilityState === "visible" &&
-                document.hasFocus();
-       }
-
-       // Send read receipts for all pending incoming messages,
-       // but only if the user is actually looking at the chat.
-       function flushReadReceipts() {
-         if (!isChatViewed() || unreadIncoming.size === 0) {
-           return;
-         }
-
-         for (const id of unreadIncoming) {
-           socket.emit("message read", { message_id: Number(id) });
-         }
-
-         unreadIncoming.clear();
-       }
-
-       document.addEventListener("visibilitychange", flushReadReceipts);
-       window.addEventListener("focus", flushReadReceipts);
-
-       socket.on("connect", () => {
-         console.log("Connected to Flask-SocketIO:", socket.id);
-         notice.textContent = "";
-         flushReadReceipts();
-       });
-
-       socket.on("connect_error", () => {
-         // Generic message only; no technical details shown to the user.
-       notice.textContent =
-         "Secure connection failed. Please refresh or log in again.";
+            const data = await res.json();
+            cb({ token: data.token });
+          } catch (err) {
+            cb({});
+          }
+        }
       });
 
-       socket.on("disconnect", (reason) => {
-             notice.textContent =
-             reason === "io server disconnect"
-             ? "You were disconnected. Please log in again."
-             : "Connection lost. Reconnecting…";
-       });
-       socket.io.on("reconnect_failed", () => {
-             notice.textContent =
-             "Could not reconnect. Please refresh the page.";
-       });
+      const form = document.getElementById("message-form");
+      const input = document.getElementById("message-input");
+      const recipient = document.getElementById("recipient");
+      const messages = document.getElementById("messages");
+      const notice = document.getElementById("notice");
+      const typingIndicator =
+        document.getElementById("typing-indicator");
 
-       function addMessage(message, isOwn) {
-         if (!message || typeof message.text !== "string") {
-           return;
-         }
+      const currentUsername = {{ username | tojson }};
+      const loginUrl = {{ url_for('login') | tojson }};
 
-         const messageId =
-           message.id != null ? String(message.id) : null;
+      // Outgoing message ID -> status element.
+      const ownMessages = new Map();
 
-         // Avoid rendering the same message more than once.
-         if (messageId && renderedMessages.has(messageId)) {
-           return;
-         }
+      // Status events received before their message is rendered.
+      const pendingStatuses = new Map();
 
-         const item = document.createElement("li");
+      // Prevent duplicate rendering.
+      const renderedMessages = new Set();
 
-         if (messageId) {
-           item.dataset.messageId = messageId;
-           renderedMessages.add(messageId);
-         }
+      // Incoming message IDs that have been rendered but not yet
+      // reported as read (because the chat window wasn't being viewed).
+      const unreadIncoming = new Set();
 
-         const body = document.createElement("span");
+      let typingTimer;
 
-         body.textContent =
-           `${isOwn ? "You" : message.username}: ${message.text}`;
+      // The chat counts as "viewed" only when this tab is visible
+      // AND the browser window has focus.
+      function isChatViewed() {
+        return document.visibilityState === "visible" &&
+               document.hasFocus();
+      }
 
-         item.appendChild(body);
+      // Send read receipts for all pending incoming messages,
+      // but only if the user is actually looking at the chat.
+      function flushReadReceipts() {
+        if (!isChatViewed() || unreadIncoming.size === 0) {
+          return;
+        }
 
-         if (isOwn && messageId) {
-           const status = document.createElement("span");
+        for (const id of unreadIncoming) {
+          socket.emit("message read", { message_id: Number(id) });
+        }
 
-           status.className = "status";
-           status.dataset.statusFor = messageId;
+        unreadIncoming.clear();
+      }
 
-           const pendingStatus = pendingStatuses.get(messageId);
+      document.addEventListener("visibilitychange", flushReadReceipts);
+      window.addEventListener("focus", flushReadReceipts);
 
-           status.textContent =
-             `(${pendingStatus || message.status || "sent"})`;
+      socket.on("connect", () => {
+        console.log("Connected to Flask-SocketIO:", socket.id);
+        notice.textContent = "";
+        flushReadReceipts();
+      });
 
-           item.appendChild(status);
+      socket.on("connect_error", (err) => {
+        // The server refuses unauthenticated handshakes with the generic
+        // reason "unauthorized": send the user back to the login page.
+        if (err && err.message === "unauthorized") {
+          window.location.href = loginUrl;
+          return;
+        }
 
-           ownMessages.set(messageId, status);
+        // Generic message only; no technical details shown to the user.
+        notice.textContent =
+          "Secure connection failed. Please refresh or log in again.";
+      });
 
-           // Apply any status event received before this message.
-           if (pendingStatus) {
-             pendingStatuses.delete(messageId);
-           }
-         }
+      socket.on("disconnect", (reason) => {
+        notice.textContent =
+          reason === "io server disconnect"
+            ? "You were disconnected. Please log in again."
+            : "Connection lost. Reconnecting…";
+      });
 
-         messages.appendChild(item);
-         messages.scrollTop = messages.scrollHeight;
+      socket.io.on("reconnect_failed", () => {
+        notice.textContent =
+          "Could not reconnect. Please refresh the page.";
+      });
 
-         // Incoming messages are queued as unread and only reported
-         // as read once the chat window is actually being viewed.
-         if (!isOwn && messageId) {
-           unreadIncoming.add(messageId);
-           flushReadReceipts();
-         }
-       }
+      function addMessage(message, isOwn) {
+        if (!message || typeof message.text !== "string") {
+          return;
+        }
 
-       form.addEventListener("submit", (event) => {
-         event.preventDefault();
+        const messageId =
+          message.id != null ? String(message.id) : null;
 
-         const text = input.value.trim();
-         const to = recipient.value.trim();
+        // Avoid rendering the same message more than once.
+        if (messageId && renderedMessages.has(messageId)) {
+          return;
+        }
 
-         if (!text || !to) {
-           notice.textContent =
-             "Enter a recipient username and a message.";
-           return;
-         }
+        const item = document.createElement("li");
 
-         notice.textContent = "";
+        if (messageId) {
+          item.dataset.messageId = messageId;
+          renderedMessages.add(messageId);
+        }
 
-         socket.emit("typing", {
-           recipient: to,
-           is_typing: false
-         });
+        const body = document.createElement("span");
 
-         socket.emit("chat message", {
-           recipient: to,
-           text: text
-         });
+        body.textContent =
+          `${isOwn ? "You" : message.username}: ${message.text}`;
 
-         input.value = "";
-         input.focus();
-       });
+        item.appendChild(body);
 
-       input.addEventListener("input", () => {
-         const to = recipient.value.trim();
+        if (isOwn && messageId) {
+          const status = document.createElement("span");
 
-         if (!to) return;
+          status.className = "status";
+          status.dataset.statusFor = messageId;
 
-         socket.emit("typing", {
-           recipient: to,
-           is_typing: input.value.length > 0
-         });
+          const pendingStatus = pendingStatuses.get(messageId);
 
-         clearTimeout(typingTimer);
+          status.textContent =
+            `(${pendingStatus || message.status || "sent"})`;
 
-         typingTimer = setTimeout(() => {
-           socket.emit("typing", {
-             recipient: to,
-             is_typing: false
-           });
-         }, 1200);
-       });
+          item.appendChild(status);
 
-       input.addEventListener("blur", () => {
-         const to = recipient.value.trim();
+          ownMessages.set(messageId, status);
 
-         if (to) {
-           socket.emit("typing", {
-             recipient: to,
-             is_typing: false
-           });
-         }
-       });
+          // Apply any status event received before this message.
+          if (pendingStatus) {
+            pendingStatuses.delete(messageId);
+          }
+        }
 
-       // Our own outgoing message.
-       socket.on("message sent", (message) => {
-         addMessage(message, true);
-       });
+        messages.appendChild(item);
+        messages.scrollTop = messages.scrollHeight;
 
-       // Message received from another user.
-       socket.on("chat message", (message, acknowledge) => {
-         // Acknowledge delivery first. Read is decided separately.
-         if (typeof acknowledge === "function") {
-           acknowledge({ received: true });
-         }
+        // Incoming messages are queued as unread and only reported
+        // as read once the chat window is actually being viewed.
+        if (!isOwn && messageId) {
+          unreadIncoming.add(messageId);
+          flushReadReceipts();
+        }
+      }
 
-         addMessage(message, false);
-       });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
 
-       // Delivery and read receipt updates.
-       socket.on("message status", (update) => {
-         if (!update || update.message_id == null) {
-           return;
-         }
+        const text = input.value.trim();
+        const to = recipient.value.trim();
 
-         const messageId = String(update.message_id);
-         const status = ownMessages.get(messageId);
+        if (!text || !to) {
+          notice.textContent =
+            "Enter a recipient username and a message.";
+          return;
+        }
 
-         console.log("Message status update:", update);
+        notice.textContent = "";
 
-         if (status) {
-           status.textContent = `(${update.status})`;
-         } else {
-           // Save the update until its message is rendered.
-           pendingStatuses.set(messageId, update.status);
-         }
-       });
+        socket.emit("typing", {
+          recipient: to,
+          is_typing: false
+        });
 
-       socket.on("chat error", (error) => {
-         notice.textContent =
-           error.message || "Unable to send message.";
-       });
+        socket.emit("chat message", {
+          recipient: to,
+          text: text
+        });
 
-       socket.on("typing", (event) => {
-         if (event.is_typing) {
-           typingIndicator.textContent =
-             `${event.username} is typing…`;
-         } else {
-           typingIndicator.textContent = "";
-         }
-       });
+        input.value = "";
+        input.focus();
+      });
+
+      input.addEventListener("input", () => {
+        const to = recipient.value.trim();
+
+        if (!to) return;
+
+        socket.emit("typing", {
+          recipient: to,
+          is_typing: input.value.length > 0
+        });
+
+        clearTimeout(typingTimer);
+
+        typingTimer = setTimeout(() => {
+          socket.emit("typing", {
+            recipient: to,
+            is_typing: false
+          });
+        }, 1200);
+      });
+
+      input.addEventListener("blur", () => {
+        const to = recipient.value.trim();
+
+        if (to) {
+          socket.emit("typing", {
+            recipient: to,
+            is_typing: false
+          });
+        }
+      });
+
+      // Our own outgoing message.
+      socket.on("message sent", (message) => {
+        addMessage(message, true);
+      });
+
+      // Message received from another user.
+      socket.on("chat message", (message, acknowledge) => {
+        // Acknowledge delivery first. Read is decided separately.
+        if (typeof acknowledge === "function") {
+          acknowledge({ received: true });
+        }
+
+        addMessage(message, false);
+      });
+
+      // Delivery and read receipt updates.
+      socket.on("message status", (update) => {
+        if (!update || update.message_id == null) {
+          return;
+        }
+
+        const messageId = String(update.message_id);
+        const status = ownMessages.get(messageId);
+
+        console.log("Message status update:", update);
+
+        if (status) {
+          status.textContent = `(${update.status})`;
+        } else {
+          // Save the update until its message is rendered.
+          pendingStatuses.set(messageId, update.status);
+        }
+      });
+
+      socket.on("chat error", (error) => {
+        notice.textContent =
+          error.message || "Unable to send message.";
+      });
+
+      socket.on("typing", (event) => {
+        if (event.is_typing) {
+          typingIndicator.textContent =
+            `${event.username} is typing…`;
+        } else {
+          typingIndicator.textContent = "";
+        }
+      });
     </script>
   </body>
 </html>

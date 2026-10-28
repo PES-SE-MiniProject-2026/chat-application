@@ -30,6 +30,7 @@ The project aims to develop a chat application that enables users to communicate
 - Message status: sent, delivered, read (read is sent only when the chat window is actually viewed)
 - Typing indicators
 - Encrypted transport (HTTPS / WSS), see [Secure Transport](#secure-transport-chat-sr-001)
+- Token-based authentication for WebSocket connections, see [WebSocket Authentication](#websocket-authentication-chat-sr-003)
 
 ## Getting Started
 
@@ -96,6 +97,16 @@ To try the chat, register two users and open them in two different browsers (or 
 
 In deployment, TLS is terminated by a reverse proxy such as nginx with a CA-issued certificate (for example Let's Encrypt). The app runs behind it with `CHAT_BEHIND_PROXY=1`, `CHAT_DEBUG=0`, a strong `CHAT_SECRET_KEY`, and `CHAT_ALLOWED_ORIGINS` set to the public HTTPS URL. Use a single worker, because online presence is currently kept in memory.
 
+## WebSocket Authentication (CHAT-SR-003)
+
+A valid authentication token is required to open a WebSocket session.
+
+- After logging in, the client requests a short-lived signed token from `GET /ws-token`. This endpoint returns `401` to users who are not logged in.
+- The token is sent in the Socket.IO handshake (`auth` payload) and expires after 60 seconds. The client fetches a fresh token on every connect and reconnect.
+- The server rejects missing, malformed, tampered or expired tokens, and tokens that do not match the logged-in session. Rejected clients only see a generic `unauthorized` message, and details stay in the server log.
+- Each connection is tied to the verified user, and message, read-receipt and typing events use that identity, never a value sent by the client.
+- Logging out disconnects the user's active sockets.
+
 ## Testing
 
 ```powershell
@@ -103,7 +114,7 @@ pip install pytest
 python -m pytest tests -v
 ```
 
-The tests cover the HTTP-to-HTTPS redirect, secure cookie settings, and rejection of insecure Socket.IO connections. They run automatically on every push through GitHub Actions (`.github/workflows/ci.yml`).
+The tests cover the HTTP-to-HTTPS redirect, secure cookie settings, rejection of insecure Socket.IO connections, authentication and logout, and WebSocket token authentication (valid, missing, malformed, tampered, expired, wrong-user and no-session cases). They run automatically on every push through GitHub Actions (`.github/workflows/ci.yml`).
 
 Testing will also cover functionality, security, performance, reliability, and usability, in accordance with the submitted Software Test Plan.
 
@@ -120,4 +131,4 @@ Project tasks, assignees, story points, priorities, and sprint planning are trac
 
 ## Project Status
 
-Sprint 1 in progress. Authentication, direct messaging, delivery/read receipts, and secure transport (CHAT-SR-001) are implemented. Group conversations, presence, file sharing, and chat history are planned for later sprints.
+Sprint 1 is complete. Authentication, direct messaging, delivery/read receipts, typing indicators, secure transport (CHAT-SR-001) and WebSocket authentication (CHAT-SR-003) are implemented and tested. Group conversations, presence, file sharing, and chat history are planned for later sprints.

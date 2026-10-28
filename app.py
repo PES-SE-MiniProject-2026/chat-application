@@ -4,6 +4,8 @@ import ssl
 import sqlite3
 import threading
 from contextlib import contextmanager
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from functools import wraps
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,29 +19,52 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration (CHAT-SR-001: secure transport)
-# ---------------------------------------------------------------------------
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+
+
+# Set CHAT_SECRET_KEY in your environment before deployment.
 DEFAULT_SECRET = "development-only-change-this-key"
+
+app.config["SECRET_KEY"] = os.environ.get(
+    "CHAT_SECRET_KEY",
+    DEFAULT_SECRET,
+)
+
+# Configuration (CHAT-SR-001: secure transport)
+
 DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
 BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
 HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")
 HTTPS_PORT = int(os.environ.get("CHAT_HTTPS_PORT", "5000"))
 HTTP_REDIRECT_PORT = int(os.environ.get("CHAT_HTTP_PORT", "5080"))
+
 CERT_FILE = os.environ.get(
-    "CHAT_CERT_FILE", os.path.join(app.root_path, "certs", "cert.pem")
+    "CHAT_CERT_FILE",
+    os.path.join(app.root_path, "certs", "cert.pem"),
 )
 KEY_FILE = os.environ.get(
-    "CHAT_KEY_FILE", os.path.join(app.root_path, "certs", "key.pem")
+    "CHAT_KEY_FILE",
+    os.path.join(app.root_path, "certs", "key.pem"),
 )
 ALLOWED_ORIGINS = os.environ.get(
     "CHAT_ALLOWED_ORIGINS",
     f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
 ).split(",")
 
-app.config["SECRET_KEY"] = os.environ.get("CHAT_SECRET_KEY", DEFAULT_SECRET)
+app.config["SECRET_KEY"] = os.environ.get(
+    "CHAT_SECRET_KEY",
+    DEFAULT_SECRET,
+)
+
 if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
     raise RuntimeError("Set CHAT_SECRET_KEY before running in production.")
+
+
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -206,9 +231,29 @@ def register():
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
             flash("Enter a valid email address.", "error")
             return render_template("register.html")
-        if len(password) < 8:
-            flash("Password must contain at least 8 characters.", "error")
+
+        
+        if len(password) < 12 or len(password) > 128:
+            flash(
+                "Password must be between 12 and 128 characters.",
+                "error",
+            )
             return render_template("register.html")
+
+        common_passwords = {
+            "password1234",
+            "qwerty123456",
+            "123456789012",
+            "welcome12345",
+        }
+
+        if password.lower() in common_passwords:
+            flash(
+                "Choose a stronger password.",
+                "error",
+            )
+            return render_template("register.html")
+
 
         password_hash = generate_password_hash(password)
         try:
@@ -226,8 +271,8 @@ def register():
         return redirect(url_for("login"))
     return render_template("register.html")
 
-
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"])
 def login():
     if request.method == "POST":
         username_or_email = request.form.get("username_or_email", "").strip()

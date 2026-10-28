@@ -4,6 +4,8 @@ import re
 import sqlite3
 from functools import wraps
 from contextlib import contextmanager
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from flask import (
     Flask,
@@ -18,6 +20,13 @@ from flask_socketio import SocketIO, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 # Set CHAT_SECRET_KEY in your environment before deployment.
 app.config["SECRET_KEY"] = os.environ.get(
@@ -91,9 +100,28 @@ def register():
             flash("Enter a valid email address.", "error")
             return render_template("register.html")
 
-        if len(password) < 8:
-            flash("Password must contain at least 8 characters.", "error")
+        
+        if len(password) < 12 or len(password) > 128:
+            flash(
+                "Password must be between 12 and 128 characters.",
+                "error",
+            )
             return render_template("register.html")
+
+        common_passwords = {
+            "password1234",
+            "qwerty123456",
+            "123456789012",
+            "welcome12345",
+        }
+
+        if password.lower() in common_passwords:
+            flash(
+                "Choose a stronger password.",
+                "error",
+            )
+            return render_template("register.html")
+
 
         password_hash = generate_password_hash(password)
 
@@ -115,8 +143,8 @@ def register():
 
     return render_template("register.html")
 
-
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"])
 def login():
     if request.method == "POST":
         username_or_email = request.form.get(
@@ -200,3 +228,4 @@ if __name__ == "__main__":
         port=5000,
         debug=True,
     )
+

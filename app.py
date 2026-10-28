@@ -1,25 +1,61 @@
 import os
 import re
+import ssl
 import sqlite3
+import threading
 from contextlib import contextmanager
 from functools import wraps
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flask import (
     Flask, render_template, request, redirect, url_for, session, flash
 )
 from flask_socketio import SocketIO, emit, join_room
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get(
-    "CHAT_SECRET_KEY", "development-only-change-this-key"
+
+# ---------------------------------------------------------------------------
+# Configuration (CHAT-SR-001: secure transport)
+# ---------------------------------------------------------------------------
+DEFAULT_SECRET = "development-only-change-this-key"
+DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
+BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
+HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")
+HTTPS_PORT = int(os.environ.get("CHAT_HTTPS_PORT", "5000"))
+HTTP_REDIRECT_PORT = int(os.environ.get("CHAT_HTTP_PORT", "5080"))
+CERT_FILE = os.environ.get(
+    "CHAT_CERT_FILE", os.path.join(app.root_path, "certs", "cert.pem")
 )
+KEY_FILE = os.environ.get(
+    "CHAT_KEY_FILE", os.path.join(app.root_path, "certs", "key.pem")
+)
+ALLOWED_ORIGINS = os.environ.get(
+    "CHAT_ALLOWED_ORIGINS",
+    f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
+).split(",")
+
+app.config["SECRET_KEY"] = os.environ.get("CHAT_SECRET_KEY", DEFAULT_SECRET)
+if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
+    raise RuntimeError("Set CHAT_SECRET_KEY before running in production.")
+
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# The login cookie is never sent over plain HTTP.
+app.config["SESSION_COOKIE_SECURE"] = True
 
 DATABASE = os.path.join(app.root_path, "users.db")
-socketio = SocketIO(app)
+
+# Only pages served from these HTTPS origins may open a Socket.IO connection.
+socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS)
+
+# When running behind nginx or another TLS-terminating proxy, trust its
+# X-Forwarded-Proto header so request.is_secure reflects the client's scheme.
+# Applied after SocketIO() so it wraps the Socket.IO middleware too.
+if BEHIND_PROXY:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # Tracks connected Socket.IO clients for this single-process development server.
 # For multiple workers/servers, use a shared presence store such as Redis.
@@ -31,6 +67,61 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ---------------------------------------------------------------------------
+# HTTPS enforcement
+# ---------------------------------------------------------------------------
+@app.before_request
+def enforce_https():
+    """Redirect any plain-HTTP request to HTTPS."""
+    if request.is_secure:
+        return None
+    return redirect(request.url.replace("http://", "https://", 1), code=301)
+
+
+@app.after_request
+def add_security_headers(response):
+    if request.is_secure and not DEBUG:
+        # Tell browsers to use HTTPS only for this site.
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.errorhandler(500)
+def internal_error(_error):
+    # Generic message only; details stay in the server log.
+    return "Something went wrong. Please try again later.", 500
+
+
+def start_http_redirector():
+    """Dev only: listen on plain HTTP and send every request to HTTPS.
+
+    The target host is fixed in config, not taken from the Host header,
+    so it cannot be abused as an open redirect.
+    """
+    class Redirect(BaseHTTPRequestHandler):
+        def _go(self):
+            self.send_response(301)
+            self.send_header(
+                "Location", f"https://{HTTPS_HOST}:{HTTPS_PORT}{self.path}"
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = _go
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", HTTP_REDIRECT_PORT), Redirect)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 @contextmanager
 def get_db():
     connection = sqlite3.connect(DATABASE)
@@ -80,6 +171,9 @@ def init_db():
         """)
 
 
+# ---------------------------------------------------------------------------
+# HTTP routes
+# ---------------------------------------------------------------------------
 def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
@@ -175,6 +269,9 @@ def logout():
     return redirect(url_for("login"))
 
 
+# ---------------------------------------------------------------------------
+# Message helpers
+# ---------------------------------------------------------------------------
 def user_room(user_id):
     return f"user_{user_id}"
 
@@ -236,8 +333,23 @@ def mark_message_delivered(message_id, sender_id, *args):
     )
 
 
+# ---------------------------------------------------------------------------
+# Socket.IO events
+# ---------------------------------------------------------------------------
+@socketio.on_error_default
+def handle_socket_error(error):
+    # Log details on the server, send only a generic message to the client.
+    app.logger.exception("Socket.IO handler error: %s", error)
+    emit("chat error", {"message": "Something went wrong. Please try again."})
+
+
 @socketio.on("connect")
 def handle_connect(auth=None):
+    # Reject any Socket.IO connection that is not over TLS (https/wss).
+    if not request.is_secure:
+        print("Rejected insecure Socket.IO connection")
+        return False
+
     user_id = session.get("user_id")
     if not user_id:
         return False
@@ -397,6 +509,30 @@ def handle_typing(data):
         )
 
 
+# ---------------------------------------------------------------------------
+# Dev entry point (HTTPS). In deployment, use gunicorn behind a TLS proxy.
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
-    socketio.run(app, host="127.0.0.1", port=5000, debug=True)
+
+    if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
+        raise SystemExit(
+            "TLS certificate not found. Create certs/cert.pem and certs/key.pem "
+            "(see the openssl command) or set CHAT_CERT_FILE / CHAT_KEY_FILE."
+        )
+
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2  # no SSLv3 / TLS 1.0 / 1.1
+    tls.load_cert_chain(CERT_FILE, KEY_FILE)
+
+    start_http_redirector()
+
+    socketio.run(
+        app,
+        host="127.0.0.1",
+        port=HTTPS_PORT,
+        debug=DEBUG,
+        use_reloader=False,  # keeps the redirector from starting twice
+        ssl_context=tls,
+        allow_unsafe_werkzeug=True,
+    )

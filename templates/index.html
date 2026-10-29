@@ -89,7 +89,64 @@
 
         <!-- Composer Area -->
         <footer class="chat-composer">
+          <!-- Selected-File Preview (CHAT-F-040) -->
+          <div id="file-preview-bar" class="file-preview-bar hidden" role="region" aria-label="Selected file preview">
+            <div class="file-preview-info">
+              <span class="file-preview-icon" id="file-preview-icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                </svg>
+              </span>
+              <span class="file-preview-name" id="file-preview-name"></span>
+              <span class="file-preview-size" id="file-preview-size"></span>
+            </div>
+            <button
+              type="button"
+              class="file-preview-remove"
+              id="file-remove-button"
+              aria-label="Remove selected attachment"
+              title="Remove attachment"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+          </div>
+
           <form id="message-form" autocomplete="off">
+            <button
+              type="button"
+              class="composer-attach-btn"
+              id="attach-button"
+              aria-label="Attach file"
+              title="Attach file (PNG, JPG, GIF, WebP, PDF, TXT)"
+            >
+              <svg
+                class="attach-icon-svg"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+              </svg>
+            </button>
+            <input
+              type="file"
+              id="file-input"
+              name="file"
+              class="sr-only"
+              accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.txt"
+              tabindex="-1"
+            />
             <label for="message-input" class="sr-only">Type a message</label>
             <input
               id="message-input"
@@ -137,6 +194,12 @@
       const form = document.getElementById("message-form");
       const input = document.getElementById("message-input");
       const sendButton = document.getElementById("send-button");
+      const attachButton = document.getElementById("attach-button");
+      const fileInput = document.getElementById("file-input");
+      const filePreviewBar = document.getElementById("file-preview-bar");
+      const filePreviewName = document.getElementById("file-preview-name");
+      const filePreviewSize = document.getElementById("file-preview-size");
+      const fileRemoveButton = document.getElementById("file-remove-button");
       const recipient = document.getElementById("recipient");
       const recipientPresence = document.getElementById("recipient-presence");
       const recipientPresenceDot = document.getElementById("recipient-presence-dot");
@@ -274,6 +337,85 @@
         }
       }
 
+      // Attachment helpers & controls (CHAT-F-040, CHAT-F-041)
+      function formatFileSize(bytes) {
+        if (typeof bytes !== "number" || isNaN(bytes) || bytes < 0) return "";
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      function clearFileSelection() {
+        if (fileInput) {
+          fileInput.value = "";
+        }
+        if (filePreviewBar) {
+          filePreviewBar.classList.add("hidden");
+        }
+        if (filePreviewName) {
+          filePreviewName.textContent = "";
+        }
+        if (filePreviewSize) {
+          filePreviewSize.textContent = "";
+        }
+        if (input) {
+          input.setAttribute("required", "");
+          input.placeholder = "Type a message...";
+        }
+      }
+
+      function showFilePreview(file) {
+        if (!file || !filePreviewBar) return;
+        filePreviewName.textContent = file.name;
+        filePreviewSize.textContent = `(${formatFileSize(file.size)})`;
+        filePreviewBar.classList.remove("hidden");
+        if (input) {
+          input.removeAttribute("required");
+          input.placeholder = "Add an optional caption...";
+        }
+      }
+
+      if (attachButton && fileInput) {
+        attachButton.addEventListener("click", () => {
+          fileInput.click();
+        });
+
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files && fileInput.files[0];
+          if (!file) {
+            clearFileSelection();
+            return;
+          }
+
+          const allowedExts = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".txt"];
+          const lowerName = file.name.toLowerCase();
+          const hasValidExt = allowedExts.some((ext) => lowerName.endsWith(ext));
+          if (!hasValidExt) {
+            notice.textContent = "Unsupported file type. Allowed: PNG, JPEG, GIF, WebP, PDF, TXT.";
+            clearFileSelection();
+            return;
+          }
+
+          if (file.size > 5 * 1024 * 1024) {
+            notice.textContent = "File exceeds maximum allowed size (5 MiB).";
+            clearFileSelection();
+            return;
+          }
+
+          notice.textContent = "";
+          showFilePreview(file);
+        });
+      }
+
+      if (fileRemoveButton) {
+        fileRemoveButton.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          clearFileSelection();
+          input.focus();
+        });
+      }
+
       socket.on("connect", () => {
         console.log("Connected to Flask-SocketIO:", socket.id);
         notice.textContent = "";
@@ -368,7 +510,7 @@
       });
 
       function addMessage(message, isOwn) {
-        if (!message || typeof message.text !== "string") {
+        if (!message || (typeof message.text !== "string" && !message.attachment_filename && !message.attachment)) {
           return;
         }
 
@@ -404,10 +546,94 @@
         header.appendChild(senderSpan);
         bubble.appendChild(header);
 
-        const textDiv = document.createElement("div");
-        textDiv.className = "message-text";
-        textDiv.textContent = message.text;
-        bubble.appendChild(textDiv);
+        // Attachment handling (CHAT-F-040)
+        const att = message.attachment || (message.attachment_filename ? {
+          filename: message.attachment_filename,
+          size: message.attachment_size,
+          mime: message.attachment_mime,
+          url: message.attachment_url || (messageId ? `/attachments/${messageId}` : null)
+        } : null);
+
+        if (att && att.filename) {
+          const filename = String(att.filename);
+          const mime = String(att.mime || "").toLowerCase();
+          const isImage = mime.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(filename);
+          const downloadUrl = att.url || (messageId ? `/attachments/${messageId}` : "#");
+
+          if (isImage) {
+            const imgContainer = document.createElement("div");
+            imgContainer.className = "message-attachment message-attachment-image";
+
+            const imgLink = document.createElement("a");
+            imgLink.href = downloadUrl;
+            imgLink.target = "_blank";
+            imgLink.rel = "noopener noreferrer";
+            imgLink.className = "attachment-image-link";
+            imgLink.setAttribute("aria-label", `View full image: ${filename}`);
+
+            const img = document.createElement("img");
+            img.src = `${downloadUrl}?inline=1`;
+            img.alt = filename;
+            img.className = "attachment-preview-img";
+            img.loading = "lazy";
+
+            imgLink.appendChild(img);
+            imgContainer.appendChild(imgLink);
+            bubble.appendChild(imgContainer);
+          } else {
+            const card = document.createElement("div");
+            card.className = "message-attachment message-attachment-card";
+
+            const icon = document.createElement("span");
+            icon.className = "attachment-icon";
+            icon.setAttribute("aria-hidden", "true");
+            icon.textContent = filename.toLowerCase().endsWith(".pdf") ? "📄" : "📝";
+            card.appendChild(icon);
+
+            const info = document.createElement("div");
+            info.className = "attachment-info";
+
+            const nameLink = document.createElement("a");
+            nameLink.href = downloadUrl;
+            nameLink.className = "attachment-filename";
+            nameLink.textContent = filename;
+            nameLink.download = filename;
+            nameLink.target = "_blank";
+            nameLink.rel = "noopener noreferrer";
+            nameLink.setAttribute("aria-label", `Download ${filename}`);
+            info.appendChild(nameLink);
+
+            if (att.size != null) {
+              const sizeSpan = document.createElement("span");
+              sizeSpan.className = "attachment-size";
+              sizeSpan.textContent = formatFileSize(att.size);
+              info.appendChild(sizeSpan);
+            }
+            card.appendChild(info);
+
+            const dlLink = document.createElement("a");
+            dlLink.href = downloadUrl;
+            dlLink.download = filename;
+            dlLink.className = "attachment-download-btn";
+            dlLink.textContent = "Download";
+            dlLink.setAttribute("aria-label", `Download ${filename}`);
+            card.appendChild(dlLink);
+
+            bubble.appendChild(card);
+          }
+        }
+
+        // Text message / caption rendering
+        const textContent = typeof message.text === "string" ? message.text : "";
+        const attFilename = att ? String(att.filename || "") : "";
+        const hasVisibleCaption = textContent && (!att || textContent.trim() !== attFilename.trim());
+
+        if (hasVisibleCaption) {
+          const textDiv = document.createElement("div");
+          textDiv.className = "message-text";
+          textDiv.textContent = textContent;
+          bubble.appendChild(textDiv);
+        }
 
         if (isOwn && messageId) {
           const metaDiv = document.createElement("div");
@@ -449,11 +675,12 @@
         }
       }
 
-      form.addEventListener("submit", (event) => {
+      form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
         const text = input.value.trim();
         const to = recipient.value.trim();
+        const file = fileInput && fileInput.files && fileInput.files[0];
 
         if (!to) {
           notice.textContent = "Please enter a recipient username.";
@@ -461,34 +688,106 @@
           return;
         }
 
-        if (!text) {
-          notice.textContent = "Please enter a message to send.";
+        if (to.toLowerCase() === currentUsername.toLowerCase()) {
+          notice.textContent = "You cannot send a message to yourself.";
+          return;
+        }
+
+        // If no file is selected, preserve the existing text-message Socket.IO path exactly.
+        if (!file) {
+          if (!text) {
+            notice.textContent = "Please enter a message to send.";
+            input.focus();
+            return;
+          }
+
+          notice.textContent = "";
+
+          // Temporarily disable the button to avoid accidental duplicate submissions
+          if (sendButton) {
+            sendButton.disabled = true;
+            setTimeout(() => {
+              sendButton.disabled = false;
+            }, 200);
+          }
+
+          socket.emit("typing", {
+            recipient: to,
+            is_typing: false
+          });
+
+          socket.emit("chat message", {
+            recipient: to,
+            text: text
+          });
+
+          input.value = "";
           input.focus();
           return;
         }
 
+        // File upload path via POST /upload
         notice.textContent = "";
-
-        // Temporarily disable the button to avoid accidental duplicate submissions
         if (sendButton) {
           sendButton.disabled = true;
-          setTimeout(() => {
-            sendButton.disabled = false;
-          }, 200);
+        }
+        if (attachButton) {
+          attachButton.disabled = true;
+        }
+        const originalButtonText = sendButton ? sendButton.textContent : "Send";
+        if (sendButton) {
+          sendButton.textContent = "Uploading...";
         }
 
-        socket.emit("typing", {
-          recipient: to,
-          is_typing: false
-        });
+        const formData = new FormData();
+        formData.append("recipient", to);
+        formData.append("file", file);
+        if (text) {
+          formData.append("text", text);
+        }
 
-        socket.emit("chat message", {
-          recipient: to,
-          text: text
-        });
+        try {
+          const res = await fetch("/upload", {
+            method: "POST",
+            body: formData,
+            credentials: "same-origin"
+          });
 
-        input.value = "";
-        input.focus();
+          let data = null;
+          try {
+            data = await res.json();
+          } catch (_jsonErr) {
+            // JSON parse failed
+          }
+
+          if (!res.ok) {
+            const errMsg = (data && data.error) ? data.error : `Upload failed (${res.status}).`;
+            notice.textContent = errMsg;
+            // Retain the file selection so the user can retry
+            return;
+          }
+
+          // Successful upload: clear selection and input
+          notice.textContent = "";
+          input.value = "";
+          clearFileSelection();
+
+          // Render immediately (renderedMessages deduplicates incoming socket event)
+          if (data) {
+            addMessage(data, true);
+          }
+        } catch (_netErr) {
+          notice.textContent = "Network error during upload. Please try again.";
+        } finally {
+          if (sendButton) {
+            sendButton.disabled = false;
+            sendButton.textContent = originalButtonText;
+          }
+          if (attachButton) {
+            attachButton.disabled = false;
+          }
+          input.focus();
+        }
       });
 
       recipient.addEventListener("input", () => {

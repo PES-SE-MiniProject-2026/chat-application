@@ -688,6 +688,117 @@ button, .btn {
   white-space: pre-wrap;
 }
 
+/* Attachment Styles (CHAT-F-040) */
+.message-attachment {
+  margin-top: var(--spacing-2);
+  margin-bottom: var(--spacing-1);
+}
+
+.message-attachment-image {
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+}
+
+.attachment-image-link {
+  display: block;
+  text-decoration: none;
+}
+
+.attachment-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 280px;
+  width: auto;
+  height: auto;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background-color: rgba(0, 0, 0, 0.02);
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.attachment-image-link:hover .attachment-preview-img {
+  transform: scale(1.01);
+  opacity: 0.95;
+}
+
+.attachment-image-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-md);
+}
+
+.message-attachment-card {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) var(--spacing-3);
+  background-color: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: var(--radius-md);
+  min-width: 180px;
+  max-width: 100%;
+}
+
+.message-outgoing .message-attachment-card {
+  background-color: rgba(255, 255, 255, 0.9);
+  border-color: #bfdbfe;
+}
+
+.attachment-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.attachment-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.attachment-filename {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-primary);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-filename:hover {
+  text-decoration: underline;
+}
+
+.attachment-size {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-light);
+}
+
+.attachment-download-btn {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-main);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.attachment-download-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-focus);
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
 .message-meta {
   display: flex;
   align-items: center;
@@ -734,17 +845,135 @@ button, .btn {
   display: none !important;
 }
 
-/* Message Composer Form */
+/* Message Composer Form & Attachment Controls (CHAT-F-040) */
 .chat-composer {
   padding: var(--spacing-3) var(--spacing-5);
   background-color: var(--color-surface);
   border-top: 1px solid var(--color-border);
 }
 
+.file-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: var(--spacing-2);
+  background-color: #f1f5f9;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-main);
+  gap: var(--spacing-3);
+  animation: fadeIn 0.15s ease-out;
+}
+
+.file-preview-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.file-preview-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+
+.file-preview-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview-size {
+  color: var(--color-text-light);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.file-preview-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-sm);
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.file-preview-remove:hover {
+  color: var(--color-error-text);
+  background-color: var(--color-error-bg);
+  border-color: var(--color-error-border);
+  transform: scale(1.08);
+}
+
+.file-preview-remove:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
 #message-form {
   display: flex;
   gap: var(--spacing-2);
   align-items: center;
+}
+
+.composer-attach-btn {
+  padding: 0.5rem 0.625rem;
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  min-height: 42px;
+  color: var(--color-text-muted);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.composer-attach-btn:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  color: var(--color-primary);
+  border-color: var(--color-border-focus);
+}
+
+.composer-attach-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.composer-attach-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.attach-icon-svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+  flex-shrink: 0;
+  stroke: currentColor;
 }
 
 #message-input {
@@ -824,8 +1053,29 @@ button, .btn {
     max-width: 90%;
   }
 
+  .attachment-preview-img {
+    max-height: 200px;
+  }
+
+  .message-attachment-card {
+    flex-wrap: wrap;
+    gap: var(--spacing-2);
+  }
+
   .chat-composer {
     padding: var(--spacing-3);
+  }
+
+  .file-preview-bar {
+    padding: 0.4rem 0.6rem;
+    gap: var(--spacing-2);
+  }
+
+  .file-preview-remove {
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
+    min-height: 26px;
   }
 
   .auth-card {

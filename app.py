@@ -3,23 +3,26 @@ import re
 import ssl
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from functools import wraps
 from datetime import datetime, timezone
+from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flask import (
     Flask, render_template, request, redirect, url_for, session, flash,
-    jsonify,
+    jsonify, send_from_directory,
 )
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from flask_socketio import (
     SocketIO, emit, join_room, ConnectionRefusedError,
 )
 from itsdangerous import URLSafeTimedSerializer, BadSignature
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
@@ -68,6 +71,15 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # The login cookie is never sent over plain HTTP.
 app.config["SESSION_COOKIE_SECURE"] = True
+
+# Maximum request size (5 MiB for file uploads)
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+UPLOAD_FOLDER = os.environ.get(
+    "CHAT_UPLOAD_FOLDER",
+    os.path.join(app.root_path, "uploads"),
+)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
 DATABASE = os.path.join(app.root_path, "users.db")
 
@@ -141,6 +153,14 @@ def add_security_headers(response):
     return response
 
 
+@app.errorhandler(RequestEntityTooLarge)
+@app.errorhandler(413)
+def request_entity_too_large(_error):
+    if request.path.startswith("/upload") or request.is_json or "application/json" in request.headers.get("Accept", ""):
+        return jsonify(error="File exceeds maximum allowed size (5 MiB)."), 413
+    return "File exceeds maximum allowed size (5 MiB).", 413
+
+
 @app.errorhandler(500)
 def internal_error(_error):
     # Generic message only; details stay in the server log.
@@ -190,6 +210,7 @@ def get_db():
 
 
 def init_db():
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     with get_db() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -218,10 +239,28 @@ def init_db():
                 created_at TEXT NOT NULL,
                 delivered_at TEXT,
                 read_at TEXT,
+                attachment_filename TEXT,
+                attachment_path TEXT,
+                attachment_size INTEGER,
+                attachment_mime TEXT,
                 FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
                 FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE
             )
         """)
+
+        # Safe migration: add attachment columns if messages table already existed without them
+        msg_columns = [
+            row["name"] for row in db.execute("PRAGMA table_info(messages)").fetchall()
+        ]
+        if "attachment_filename" not in msg_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN attachment_filename TEXT")
+        if "attachment_path" not in msg_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN attachment_path TEXT")
+        if "attachment_size" not in msg_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN attachment_size INTEGER")
+        if "attachment_mime" not in msg_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN attachment_mime TEXT")
+
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_recipient_delivery
             ON messages(recipient_id, delivered_at)
@@ -234,6 +273,88 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_unread
             ON messages(recipient_id, sender_id, read_at)
         """)
+
+
+# ---------------------------------------------------------------------------
+# File attachment validation & helpers
+# ---------------------------------------------------------------------------
+ALLOWED_ATTACHMENT_EXTENSIONS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+}
+
+
+def validate_attachment(file_storage):
+    """Validate uploaded file type, size, extension, and content signatures.
+
+    Returns: (is_valid, error_message, ext, canonical_mime, content_bytes)
+    """
+    if not file_storage or not file_storage.filename:
+        return False, "No file selected.", None, None, None
+
+    filename = file_storage.filename
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+
+    if ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
+        return False, f"Unsupported file type '{ext}'. Allowed types: PNG, JPEG, GIF, WebP, PDF, TXT.", None, None, None
+
+    canonical_mime = ALLOWED_ATTACHMENT_EXTENSIONS[ext]
+
+    content = file_storage.read()
+    if len(content) == 0:
+        return False, "Uploaded file is empty.", None, None, None
+
+    if len(content) > 5 * 1024 * 1024:
+        return False, "File exceeds maximum allowed size (5 MiB).", None, None, None
+
+    # Binary magic bytes & format signature verification
+    if ext == ".png":
+        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            return False, "File content does not match PNG signature.", None, None, None
+    elif ext in (".jpg", ".jpeg"):
+        if not content.startswith(b"\xff\xd8\xff"):
+            return False, "File content does not match JPEG signature.", None, None, None
+    elif ext == ".gif":
+        if not (content.startswith(b"GIF87a") or content.startswith(b"GIF89a")):
+            return False, "File content does not match GIF signature.", None, None, None
+    elif ext == ".webp":
+        if len(content) < 12 or not content.startswith(b"RIFF") or content[8:12] != b"WEBP":
+            return False, "File content does not match WebP signature.", None, None, None
+    elif ext == ".pdf":
+        if not content.startswith(b"%PDF-"):
+            return False, "File content does not match PDF signature.", None, None, None
+    elif ext == ".txt":
+        if b"\x00" in content:
+            return False, "Text file contains NUL bytes.", None, None, None
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError:
+            return False, "Text file is not valid UTF-8.", None, None, None
+        for ch in decoded:
+            code = ord(ch)
+            if (code < 32 and code not in (9, 10, 13)) or code == 127:
+                return False, "Text file contains disallowed control characters.", None, None, None
+
+    return True, "", ext, canonical_mime, content
+
+
+def sanitize_display_filename(filename, ext):
+    """Normalize display filename to a safe basename, remove control characters, and cap length."""
+    raw = os.path.basename(filename)
+    clean = re.sub(r"[\x00-\x1f\x7f]", "", raw).strip()
+    safe = secure_filename(clean)
+    if not safe or safe == ext.lstrip("."):
+        safe = f"attachment_{uuid.uuid4().hex[:8]}{ext}"
+    if len(safe) > 200:
+        base, extension = os.path.splitext(safe)
+        safe = base[: 200 - len(extension)] + extension
+    return safe
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +487,136 @@ def logout():
     return redirect(url_for("login"))
 
 
+@app.route("/upload", methods=["POST"])
+@login_required
+def upload():
+    sender_id = session.get("user_id")
+    if not sender_id:
+        return jsonify(error="Unauthorized"), 401
+
+    recipient_username = request.form.get("recipient", "").strip()
+    if not recipient_username:
+        return jsonify(error="Recipient is required."), 400
+
+    with get_db() as db:
+        recipient = db.execute(
+            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE",
+            (recipient_username,),
+        ).fetchone()
+
+    if recipient is None:
+        return jsonify(error="Recipient not found."), 404
+
+    if recipient["id"] == sender_id:
+        return jsonify(error="You cannot send an attachment to yourself."), 400
+
+    caption = request.form.get("text", "").strip()
+    if caption and len(caption) > 1000:
+        return jsonify(error="Caption must not exceed 1000 characters."), 400
+
+    if "file" not in request.files:
+        return jsonify(error="No file selected."), 400
+
+    file_storage = request.files["file"]
+    is_valid, err_msg, ext, mime_type, content = validate_attachment(file_storage)
+    if not is_valid:
+        if "exceeds" in err_msg.lower():
+            return jsonify(error=err_msg), 413
+        return jsonify(error=err_msg), 400
+
+    display_name = sanitize_display_filename(file_storage.filename, ext)
+    message_text = caption if caption else display_name
+
+    storage_name = f"{uuid.uuid4().hex}{ext}"
+    target_folder = UPLOAD_FOLDER
+    os.makedirs(target_folder, exist_ok=True)
+    file_path = os.path.join(target_folder, storage_name)
+    file_written = False
+
+    try:
+        with open(file_path, "wb") as f:
+            f.write(content)
+        file_written = True
+
+        with get_db() as db:
+            cursor = db.execute("""
+                INSERT INTO messages (
+                    sender_id, recipient_id, text, created_at,
+                    attachment_filename, attachment_path, attachment_size, attachment_mime
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                sender_id, recipient["id"], message_text, utc_now(),
+                display_name, storage_name, len(content), mime_type,
+            ))
+            message_id = cursor.lastrowid
+            row = fetch_message(db, message_id)
+            payload = message_payload(row)
+            recipient_id = recipient["id"]
+            recipient_unread = get_unread_counts(db, recipient_id)
+    except Exception as exc:
+        if file_written and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        app.logger.exception("Upload processing error: %s", exc)
+        return jsonify(error="Failed to process file upload."), 500
+
+    # Real-time notifications
+    socketio.emit("message sent", payload, to=user_room(sender_id))
+    socketio.emit("unread counts", recipient_unread, to=user_room(recipient_id))
+
+    for sid in list(connected_users.get(recipient_id, set())):
+        socketio.emit(
+            "chat message",
+            payload,
+            to=sid,
+            callback=lambda *args, mid=message_id, sender=sender_id:
+                mark_message_delivered(mid, sender, *args),
+        )
+
+    return jsonify(payload), 201
+
+
+@app.route("/attachments/<int:message_id>", methods=["GET"])
+@login_required
+def download_attachment(message_id):
+    current_user_id = session.get("user_id")
+    if not current_user_id:
+        return jsonify(error="Unauthorized"), 401
+
+    with get_db() as db:
+        msg = fetch_message(db, message_id)
+
+    if msg is None or not msg["attachment_path"]:
+        return jsonify(error="Attachment not found."), 404
+
+    if current_user_id != msg["sender_id"] and current_user_id != msg["recipient_id"]:
+        return jsonify(error="Forbidden. You do not have permission to access this attachment."), 403
+
+    storage_filename = os.path.basename(msg["attachment_path"])
+    abs_upload_folder = os.path.abspath(UPLOAD_FOLDER)
+    target_path = os.path.abspath(os.path.join(abs_upload_folder, storage_filename))
+
+    # Path traversal protection
+    if not target_path.startswith(abs_upload_folder) or not os.path.isfile(target_path):
+        return jsonify(error="Attachment file not found on server."), 404
+
+    download_name = msg["attachment_filename"] or f"attachment_{message_id}"
+    is_inline = request.args.get("inline") == "1" and (msg["attachment_mime"] or "").startswith("image/")
+
+    response = send_from_directory(
+        abs_upload_folder,
+        storage_filename,
+        mimetype=msg["attachment_mime"],
+        as_attachment=not is_inline,
+        download_name=download_name,
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "default-src 'none'"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Message & presence helpers
 # ---------------------------------------------------------------------------
@@ -406,7 +657,18 @@ def get_missed_messages_summary(db, recipient_id):
 
 
 def message_payload(row):
-    return {
+    att_fn = None
+    att_size = None
+    att_mime = None
+    try:
+        att_fn = row["attachment_filename"]
+        att_size = row["attachment_size"]
+        att_mime = row["attachment_mime"]
+    except (IndexError, KeyError):
+        pass
+
+    has_attachment = bool(att_fn)
+    payload = {
         "id": row["id"],
         "sender_id": row["sender_id"],
         "recipient_id": row["recipient_id"],
@@ -417,7 +679,19 @@ def message_payload(row):
         "status": "read" if row["read_at"] else (
             "delivered" if row["delivered_at"] else "sent"
         ),
+        "attachment_filename": att_fn if has_attachment else None,
+        "attachment_size": att_size if has_attachment else None,
+        "attachment_mime": att_mime if has_attachment else None,
+        "attachment_url": f"/attachments/{row['id']}" if has_attachment else None,
     }
+    if has_attachment:
+        payload["attachment"] = {
+            "filename": att_fn,
+            "size": att_size,
+            "mime": att_mime,
+            "url": f"/attachments/{row['id']}",
+        }
+    return payload
 
 
 def fetch_message(db, message_id):

@@ -197,9 +197,18 @@ def init_db():
                 username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 email TEXT NOT NULL COLLATE NOCASE UNIQUE,
                 password_hash TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TEXT
             )
         """)
+
+        # Safe migration: add last_seen if users table already existed without it
+        user_columns = [
+            row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()
+        ]
+        if "last_seen" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +229,10 @@ def init_db():
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_conversation
             ON messages(sender_id, recipient_id, id)
+        """)
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_unread
+            ON messages(recipient_id, sender_id, read_at)
         """)
 
 
@@ -354,10 +367,42 @@ def logout():
 
 
 # ---------------------------------------------------------------------------
-# Message helpers
+# Message & presence helpers
 # ---------------------------------------------------------------------------
 def user_room(user_id):
     return f"user_{user_id}"
+
+
+def get_unread_counts(db, recipient_id):
+    """Return unread message counts for recipient_id grouped by sender username."""
+    rows = db.execute("""
+        SELECT s.username, COUNT(m.id) AS count
+        FROM messages m
+        JOIN users s ON s.id = m.sender_id
+        WHERE m.recipient_id = ? AND m.read_at IS NULL
+        GROUP BY s.username
+    """, (recipient_id,)).fetchall()
+    counts = {row["username"]: row["count"] for row in rows}
+    return {
+        "counts": counts,
+        "total": sum(counts.values()),
+    }
+
+
+def get_missed_messages_summary(db, recipient_id):
+    """Return undelivered message counts for recipient_id grouped by sender username."""
+    rows = db.execute("""
+        SELECT s.username, COUNT(m.id) AS count
+        FROM messages m
+        JOIN users s ON s.id = m.sender_id
+        WHERE m.recipient_id = ? AND m.delivered_at IS NULL
+        GROUP BY s.username
+    """, (recipient_id,)).fetchall()
+    senders = {row["username"]: row["count"] for row in rows}
+    return {
+        "total": sum(senders.values()),
+        "senders": senders,
+    }
 
 
 def message_payload(row):
@@ -446,21 +491,45 @@ def handle_connect(auth=None):
         raise ConnectionRefusedError("unauthorized")
 
     with get_db() as db:
-        user_exists = db.execute(
-            "SELECT 1 FROM users WHERE id = ?", (token_uid,)
+        user = db.execute(
+            "SELECT id, username FROM users WHERE id = ?", (token_uid,)
         ).fetchone()
 
-    if user_exists is None:
+    if user is None:
         app.logger.warning("Rejected Socket.IO handshake for unknown user")
         raise ConnectionRefusedError("unauthorized")
 
     # Associate this connection with the verified user.
     user_id = token_uid
     sid = request.sid
+    username = user["username"]
+
+    is_first_connection = len(connected_users.get(user_id, set())) == 0
+
     sid_to_user[sid] = user_id
     join_room(user_room(user_id))
     connected_users.setdefault(user_id, set()).add(sid)
     print(f"Client connected: user_id={user_id}")
+
+    # Presence: if this is the user's first active socket connection,
+    # set last_seen to NULL and broadcast an online presence update.
+    if is_first_connection:
+        with get_db() as db:
+            db.execute("UPDATE users SET last_seen = NULL WHERE id = ?", (user_id,))
+        socketio.emit(
+            "presence update",
+            {"username": username, "is_online": True, "last_seen": None},
+        )
+
+    # Missed messages summary and initial unread counts for this connecting socket.
+    with get_db() as db:
+        missed_summary = get_missed_messages_summary(db, user_id)
+        unread_summary = get_unread_counts(db, user_id)
+
+    if missed_summary["total"] > 0:
+        socketio.emit("missed messages", missed_summary, to=sid)
+
+    socketio.emit("unread counts", unread_summary, to=sid)
 
     # Collect messages saved while this recipient was offline.
     payloads = []
@@ -494,10 +563,67 @@ def handle_disconnect(reason=None):
     if user_id is not None and user_id in connected_users:
         connected_users[user_id].discard(request.sid)
 
+        # Broadcast offline transition only when the user's last socket disconnects.
         if not connected_users[user_id]:
             connected_users.pop(user_id, None)
+            now = utc_now()
+            with get_db() as db:
+                user = db.execute(
+                    "SELECT username FROM users WHERE id = ?", (user_id,)
+                ).fetchone()
+                db.execute(
+                    "UPDATE users SET last_seen = ? WHERE id = ?", (now, user_id)
+                )
+            if user:
+                socketio.emit(
+                    "presence update",
+                    {
+                        "username": user["username"],
+                        "is_online": False,
+                        "last_seen": now,
+                    },
+                )
 
     print(f"Client disconnected: user_id={user_id}")
+
+
+@socketio.on("get presence")
+def handle_get_presence(data):
+    requester_id = sid_to_user.get(request.sid)
+    if not requester_id:
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    if not isinstance(data, dict):
+        emit("chat error", {"message": "Invalid presence request."})
+        return
+
+    target_username = str(data.get("username", "")).strip()
+    if not target_username:
+        emit("chat error", {"message": "Username is required."})
+        return
+
+    with get_db() as db:
+        target = db.execute(
+            "SELECT id, username, last_seen FROM users WHERE username = ? COLLATE NOCASE",
+            (target_username,),
+        ).fetchone()
+
+    if target is None:
+        emit("chat error", {"message": "User not found."})
+        return
+
+    is_online = bool(connected_users.get(target["id"]))
+    last_seen = None if is_online else target["last_seen"]
+
+    emit(
+        "presence update",
+        {
+            "username": target["username"],
+            "is_online": is_online,
+            "last_seen": last_seen,
+        },
+    )
 
 
 @socketio.on("chat message")
@@ -534,9 +660,11 @@ def handle_chat_message(data):
         message_id = cursor.lastrowid
         payload = message_payload(fetch_message(db, message_id))
         recipient_id = recipient["id"]
+        recipient_unread = get_unread_counts(db, recipient_id)
     # The commit has happened here, so other connections can see the row.
 
     emit("message sent", payload)
+    socketio.emit("unread counts", recipient_unread, to=user_room(recipient_id))
 
     # A message is persisted regardless of recipient presence.
     for sid in list(connected_users.get(recipient_id, set())):
@@ -581,6 +709,7 @@ def handle_message_read(data):
             (now, now, message_id),
         )
         sender_id = row["sender_id"]
+        reader_unread = get_unread_counts(db, reader_id)
 
     # Emitted after the commit.
     emit(
@@ -588,6 +717,7 @@ def handle_message_read(data):
         {"message_id": message_id, "status": "read"},
         to=user_room(sender_id),
     )
+    socketio.emit("unread counts", reader_unread, to=user_room(reader_id))
 
 
 @socketio.on("typing")

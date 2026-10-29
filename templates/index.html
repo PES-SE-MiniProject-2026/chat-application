@@ -39,17 +39,35 @@
       <main class="chat-main-card">
         <!-- Recipient Bar -->
         <div class="recipient-toolbar">
-          <label for="recipient">Chat with:</label>
-          <div class="recipient-input-wrapper">
-            <input
-              id="recipient"
-              name="recipient"
-              maxlength="30"
-              required
-              placeholder="Enter recipient username..."
-              autocomplete="off"
-            />
+          <div class="recipient-field-group">
+            <label for="recipient">Chat with:</label>
+            <div class="recipient-input-wrapper">
+              <input
+                id="recipient"
+                name="recipient"
+                maxlength="30"
+                required
+                placeholder="Enter recipient username..."
+                autocomplete="off"
+              />
+            </div>
+            <span id="recipient-unread-badge" class="unread-badge hidden" title="Unread messages" aria-live="polite"></span>
           </div>
+
+          <!-- Recipient Presence Status (CHAT-F-030) -->
+          <div id="recipient-presence" class="recipient-presence hidden" aria-live="polite">
+            <span class="presence-dot offline" id="recipient-presence-dot" aria-hidden="true"></span>
+            <span class="presence-text" id="recipient-presence-text">Offline</span>
+          </div>
+        </div>
+
+        <!-- Missed-Messages Banner (CHAT-F-031) -->
+        <div id="missed-messages-banner" class="missed-banner hidden" role="region" aria-label="Missed messages notification">
+          <div class="missed-banner-inner">
+            <span class="missed-banner-icon" aria-hidden="true">&#9888;</span>
+            <span id="missed-messages-text" class="missed-banner-text"></span>
+          </div>
+          <button type="button" class="missed-banner-close" id="missed-banner-dismiss" aria-label="Dismiss missed messages notification">&times;</button>
         </div>
 
         <!-- Feedback & Status Bar -->
@@ -120,6 +138,13 @@
       const input = document.getElementById("message-input");
       const sendButton = document.getElementById("send-button");
       const recipient = document.getElementById("recipient");
+      const recipientPresence = document.getElementById("recipient-presence");
+      const recipientPresenceDot = document.getElementById("recipient-presence-dot");
+      const recipientPresenceText = document.getElementById("recipient-presence-text");
+      const unreadBadge = document.getElementById("recipient-unread-badge");
+      const missedBanner = document.getElementById("missed-messages-banner");
+      const missedText = document.getElementById("missed-messages-text");
+      const missedBannerDismiss = document.getElementById("missed-banner-dismiss");
       const messages = document.getElementById("messages");
       const messagesContainer = document.getElementById("messages-container");
       const emptyState = document.getElementById("messages-empty");
@@ -143,6 +168,12 @@
       // reported as read (because the chat window wasn't being viewed).
       const unreadIncoming = new Set();
 
+      // Unread counts cache by lower-case sender username (CHAT-F-032).
+      let latestUnreadCounts = {};
+
+      // Track currently displayed presence username (CHAT-F-030).
+      let activePresenceUsername = null;
+      let presenceDebounce = null;
       let typingTimer;
 
       // The chat counts as "viewed" only when this tab is visible
@@ -169,6 +200,80 @@
       document.addEventListener("visibilitychange", flushReadReceipts);
       window.addEventListener("focus", flushReadReceipts);
 
+      // Presence and last-seen formatting (CHAT-F-030)
+      function formatLastSeen(isoString) {
+        if (!isoString) return "Offline";
+        const date = new Date(isoString);
+        if (isNaN(date.getTime())) return "Offline";
+        const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
+        if (diffSec < 60) return "Offline · Last seen just now";
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60) return `Offline · Last seen ${diffMin}m ago`;
+        const diffHours = Math.floor(diffMin / 60);
+        if (diffHours < 24) return `Offline · Last seen ${diffHours}h ago`;
+        const diffDays = Math.floor(diffHours / 24);
+        return `Offline · Last seen ${diffDays}d ago`;
+      }
+
+      function clearPresenceIndicator() {
+        activePresenceUsername = null;
+        recipientPresence.classList.add("hidden");
+        recipientPresenceText.textContent = "";
+        recipientPresenceDot.className = "presence-dot offline";
+      }
+
+      function updateRecipientPresence(data) {
+        if (!data || !data.username) return;
+        const currentTarget = recipient.value.trim();
+        if (!currentTarget || currentTarget.toLowerCase() !== data.username.toLowerCase()) {
+          return;
+        }
+        if (data.username.toLowerCase() === currentUsername.toLowerCase()) {
+          clearPresenceIndicator();
+          return;
+        }
+
+        activePresenceUsername = data.username.toLowerCase();
+        recipientPresence.classList.remove("hidden");
+
+        if (data.is_online) {
+          recipientPresenceDot.className = "presence-dot online";
+          recipientPresenceText.textContent = "Online";
+        } else {
+          recipientPresenceDot.className = "presence-dot offline";
+          recipientPresenceText.textContent = formatLastSeen(data.last_seen);
+        }
+      }
+
+      function requestPresence(target) {
+        const trimmed = (target || "").trim();
+        if (!trimmed || trimmed.toLowerCase() === currentUsername.toLowerCase()) {
+          clearPresenceIndicator();
+          return;
+        }
+        socket.emit("get presence", { username: trimmed });
+      }
+
+      // Unread count badge update (CHAT-F-032)
+      function updateUnreadBadge() {
+        const target = recipient.value.trim().toLowerCase();
+        if (!target || target === currentUsername.toLowerCase()) {
+          unreadBadge.classList.add("hidden");
+          unreadBadge.textContent = "";
+          return;
+        }
+
+        const count = latestUnreadCounts[target] || 0;
+        if (count > 0) {
+          unreadBadge.textContent = `${count} unread`;
+          unreadBadge.setAttribute("aria-label", `${count} unread messages from ${recipient.value.trim()}`);
+          unreadBadge.classList.remove("hidden");
+        } else {
+          unreadBadge.classList.add("hidden");
+          unreadBadge.textContent = "";
+        }
+      }
+
       socket.on("connect", () => {
         console.log("Connected to Flask-SocketIO:", socket.id);
         notice.textContent = "";
@@ -177,6 +282,11 @@
           connectionDot.parentElement.title = "Connected to chat server";
         }
         flushReadReceipts();
+
+        const activeTarget = recipient.value.trim();
+        if (activeTarget && activeTarget.toLowerCase() !== currentUsername.toLowerCase()) {
+          requestPresence(activeTarget);
+        }
       });
 
       socket.on("connect_error", (err) => {
@@ -215,6 +325,46 @@
         }
         notice.textContent =
           "Could not reconnect. Please refresh the page.";
+      });
+
+      // Presence broadcast listener (CHAT-F-030)
+      socket.on("presence update", (data) => {
+        updateRecipientPresence(data);
+      });
+
+      // Missed messages on reconnect (CHAT-F-031)
+      socket.on("missed messages", (data) => {
+        if (!data || typeof data.total !== "number" || data.total <= 0) {
+          missedBanner.classList.add("hidden");
+          missedText.textContent = "";
+          return;
+        }
+
+        const senders = data.senders || {};
+        const senderParts = [];
+        for (const [senderName, count] of Object.entries(senders)) {
+          senderParts.push(`${senderName} (${count})`);
+        }
+
+        const senderSummary = senderParts.length > 0 ? ` from ${senderParts.join(", ")}` : "";
+        const messageWord = data.total === 1 ? "message" : "messages";
+        missedText.textContent = `You missed ${data.total} ${messageWord} while offline${senderSummary}.`;
+        missedBanner.classList.remove("hidden");
+      });
+
+      missedBannerDismiss.addEventListener("click", () => {
+        missedBanner.classList.add("hidden");
+      });
+
+      // Authoritative unread counts listener (CHAT-F-032)
+      socket.on("unread counts", (data) => {
+        latestUnreadCounts = {};
+        if (data && data.counts && typeof data.counts === "object") {
+          for (const [uname, count] of Object.entries(data.counts)) {
+            latestUnreadCounts[uname.toLowerCase()] = count;
+          }
+        }
+        updateUnreadBadge();
       });
 
       function addMessage(message, isOwn) {
@@ -341,6 +491,42 @@
         input.focus();
       });
 
+      recipient.addEventListener("input", () => {
+        clearTimeout(presenceDebounce);
+        const to = recipient.value.trim();
+
+        if (!to || to.toLowerCase() === currentUsername.toLowerCase()) {
+          clearPresenceIndicator();
+          updateUnreadBadge();
+          return;
+        }
+
+        // Clear stale presence indicator when typing a new recipient
+        if (activePresenceUsername && activePresenceUsername !== to.toLowerCase()) {
+          clearPresenceIndicator();
+        }
+
+        updateUnreadBadge();
+
+        presenceDebounce = setTimeout(() => {
+          requestPresence(to);
+        }, 300);
+      });
+
+      recipient.addEventListener("change", () => {
+        const to = recipient.value.trim();
+        if (to && to.toLowerCase() !== currentUsername.toLowerCase()) {
+          requestPresence(to);
+        }
+      });
+
+      recipient.addEventListener("blur", () => {
+        const to = recipient.value.trim();
+        if (to && to.toLowerCase() !== currentUsername.toLowerCase()) {
+          requestPresence(to);
+        }
+      });
+
       input.addEventListener("input", () => {
         const to = recipient.value.trim();
 
@@ -408,8 +594,11 @@
       });
 
       socket.on("chat error", (error) => {
-        notice.textContent =
-          error.message || "Unable to send message.";
+        const msg = (error && error.message) ? error.message : "Unable to send message.";
+        notice.textContent = msg;
+        if (msg === "User not found.") {
+          clearPresenceIndicator();
+        }
       });
 
       socket.on("typing", (event) => {

@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flask import (
     Flask, render_template, request, redirect, url_for, session, flash,
-    jsonify, send_from_directory,
+    jsonify, send_from_directory, abort,
 )
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -46,7 +46,7 @@ app.config["SECRET_KEY"] = os.environ.get(
 
 DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
 BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
-HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")
+HTTPS_HOST = os.environ.get("CHAT_HOST", "127.0.0.1")
 HTTPS_PORT = int(os.environ.get("CHAT_HTTPS_PORT", "5000"))
 HTTP_REDIRECT_PORT = int(os.environ.get("CHAT_HTTP_PORT", "5080"))
 
@@ -60,7 +60,7 @@ KEY_FILE = os.environ.get(
 )
 ALLOWED_ORIGINS = os.environ.get(
     "CHAT_ALLOWED_ORIGINS",
-    f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
+    f"https://127.0.0.1:{HTTPS_PORT}",
 ).split(",")
 
 if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
@@ -238,10 +238,11 @@ def init_db():
         user_columns = [
             row["name"] for row in db.execute("PRAGMA table_info(users)").fetchall()
         ]
+                # Safe migration: add last_seen if missing
         if "last_seen" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
 
-                # Safe migrations for administration and user moderation
+        # Safe migrations for administration and user moderation
         if "role" not in user_columns:
             db.execute(
                 "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
@@ -250,6 +251,15 @@ def init_db():
         if "account_status" not in user_columns:
             db.execute(
                 "ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'"
+            )
+
+                # Promote the configured local administrator account
+        admin_username = os.environ.get("CHAT_ADMIN_USERNAME", "").strip()
+
+        if admin_username:
+            db.execute(
+                "UPDATE users SET role = 'admin' WHERE username = ? COLLATE NOCASE",
+                (admin_username,)
             )
 
         db.execute("""
@@ -483,8 +493,17 @@ def admin_required(view):
 @app.route("/")
 @login_required
 def index():
-    return render_template("index.html", username=session["username"])
+    with get_db() as db:
+        user = db.execute(
+            "SELECT role FROM users WHERE id = ?",
+            (session["user_id"],)
+        ).fetchone()
 
+    return render_template(
+        "index.html",
+        username=session["username"],
+        is_admin=user is not None and user["role"] == "admin"
+    )
 
 @app.route("/ws-token")
 @limiter.limit("30 per minute")
@@ -586,6 +605,7 @@ def login():
     return render_template("login.html")
 
 
+
 @app.route("/logout", methods=["POST"])
 def logout():
     user_id = session.get("user_id")
@@ -603,6 +623,87 @@ def logout():
     flash("You have been logged out.", "success")
     return redirect(url_for("login"))
 
+@app.route("/admin")
+@login_required
+@admin_required
+def admin_dashboard():
+    with get_db() as db:
+        users = db.execute(
+            """
+            SELECT id, username, email, role, account_status, created_at
+            FROM users
+            ORDER BY username
+            """
+        ).fetchall()
+
+    return render_template("admin.html", users=users)
+
+@app.route("/admin/users/<int:user_id>/status", methods=["POST"])
+@login_required
+@admin_required
+def update_user_status(user_id):
+    new_status = request.form.get("status", "").strip().lower()
+
+    if new_status not in ("active", "suspended", "banned"):
+        flash("Invalid account status.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    if user_id == session["user_id"]:
+        flash("You cannot change your own account status.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    with get_db() as db:
+        target = db.execute(
+            "SELECT id, role FROM users WHERE id = ?",
+            (user_id,)
+        ).fetchone()
+
+        if target is None:
+            flash("User not found.", "error")
+            return redirect(url_for("admin_dashboard"))
+
+        if target["role"] == "admin":
+            flash("You cannot moderate another administrator.", "error")
+            return redirect(url_for("admin_dashboard"))
+
+        db.execute(
+            "UPDATE users SET account_status = ? WHERE id = ?",
+            (new_status, user_id)
+        )
+
+    if new_status in ("suspended", "banned"):
+        active_sids = list(connected_users.get(user_id, set()))
+
+        for sid in active_sids:
+            socketio.server.disconnect(sid, namespace="/")
+
+    flash(f"User account status updated to {new_status}.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+@app.route("/admin/announcements", methods=["POST"])
+@login_required
+@admin_required
+def broadcast_announcement():
+    message = request.form.get("announcement", "").strip()
+
+    if not message:
+        flash("Announcement cannot be empty.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    if len(message) > 1000:
+        flash("Announcement cannot exceed 1000 characters.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    announcement = {
+        "message": message,
+        "sender": session["username"],
+        "created_at": utc_now()
+    }
+
+    socketio.emit("system announcement", announcement)
+
+    flash("Announcement broadcast successfully.", "success")
+    return redirect(url_for("admin_dashboard"))
 
 @app.route("/upload", methods=["POST"])
 @login_required
@@ -1866,3 +1967,16 @@ def handle_typing(data):
             {"username": sender["username"], "is_typing": is_typing},
             to=user_room(recipient["id"]),
         )
+
+if __name__ == "__main__":
+    init_db()
+    print("Starting Chat Application...")
+    socketio.run(
+        app,
+        host=HTTPS_HOST,
+        port=HTTPS_PORT,
+        debug=True,
+        ssl_context=(CERT_FILE, KEY_FILE),
+        allow_unsafe_werkzeug=True
+    )
+

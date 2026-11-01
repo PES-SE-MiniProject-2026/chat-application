@@ -223,6 +223,16 @@ def init_db():
                 last_seen TEXT
             )
         """)
+        columns = [
+            row["name"]
+            for row in db.execute("PRAGMA table_info(users)").fetchall()
+        ]
+
+        if "account_status" not in columns:
+            db.execute("""
+                ALTER TABLE users
+                ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'
+            """)
 
         # Safe migration: add last_seen if users table already existed without it
         user_columns = [
@@ -832,11 +842,12 @@ def handle_connect(auth=None):
 
     with get_db() as db:
         user = db.execute(
-            "SELECT id, username FROM users WHERE id = ?", (token_uid,)
+            "SELECT id, username, account_status FROM users WHERE id = ?",
+            (token_uid,)
         ).fetchone()
 
-    if user is None:
-        app.logger.warning("Rejected Socket.IO handshake for unknown user")
+    if user is None or user["account_status"] != "active":
+        app.logger.warning("Rejected Socket.IO handshake for unavailable account")
         raise ConnectionRefusedError("unauthorized")
 
     # Associate this connection with the verified user.

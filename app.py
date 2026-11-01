@@ -241,6 +241,17 @@ def init_db():
         if "last_seen" not in user_columns:
             db.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
 
+                # Safe migrations for administration and user moderation
+        if "role" not in user_columns:
+            db.execute(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"
+            )
+
+        if "account_status" not in user_columns:
+            db.execute(
+                "ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'"
+            )
+
         db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -444,6 +455,30 @@ def login_required(view):
         return view(*args, **kwargs)
     return wrapped_view
 
+def admin_required(view):
+    @wraps(view)
+    def wrapped_view(*args, **kwargs):
+        if "user_id" not in session:
+            flash("Please log in to continue.", "error")
+            return redirect(url_for("login"))
+
+        with get_db() as db:
+            user = db.execute(
+                "SELECT role, account_status FROM users WHERE id = ?",
+                (session["user_id"],)
+            ).fetchone()
+
+        if user is None or user["account_status"] != "active":
+            session.clear()
+            flash("Your account is not active.", "error")
+            return redirect(url_for("login"))
+
+        if user["role"] != "admin":
+            abort(403)
+
+        return view(*args, **kwargs)
+
+    return wrapped_view
 
 @app.route("/")
 @login_required
@@ -527,17 +562,24 @@ def login():
         password = request.form.get("password", "")
         with get_db() as db:
             user = db.execute(
-                """SELECT id, username, password_hash FROM users
+                """SELECT id, username, password_hash, account_status FROM users
                    WHERE username = ? COLLATE NOCASE
                       OR email = ? COLLATE NOCASE""",
                 (username_or_email, username_or_email),
             ).fetchone()
+
+
 
         if user is None or not check_password_hash(user["password_hash"], password):
             flash("Invalid username/email or password.", "error")
             return render_template("login.html")
 
         session.clear()
+        if user["account_status"] != "active":
+            return jsonify({
+                "success": False,
+                "message": "Your account is suspended or banned. Contact an administrator."
+            }), 403
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         return redirect(url_for("index"))
@@ -848,6 +890,7 @@ def handle_connect(auth=None):
 
     if user is None or user["account_status"] != "active":
         app.logger.warning("Rejected Socket.IO handshake for unavailable account")
+        raise ConnectionRefusedError("unauthorized")
         raise ConnectionRefusedError("unauthorized")
 
     # Associate this connection with the verified user.

@@ -317,6 +317,30 @@
         socket.emit("get presence", { username: trimmed });
       }
 
+      function loadChatHistory(username) {
+        const target = (username || "").trim();
+
+        if (!target || target.toLowerCase() === currentUsername.toLowerCase()) {
+            return;
+        }
+
+        renderedMessages.clear();
+        unreadIncoming.clear();
+        pendingStatuses.clear();
+        ownMessages.clear();
+
+        messages.innerHTML = "";
+
+        if (emptyState) {
+            emptyState.style.display = "block";
+            emptyState.textContent = "Loading chat history...";
+        }
+
+        socket.emit("load chat history", {
+            recipient: target
+        });
+    }
+
       // Unread count badge update (CHAT-F-032)
       function updateUnreadBadge() {
         const target = recipient.value.trim().toLowerCase();
@@ -545,6 +569,16 @@
         senderSpan.textContent = isOwn ? "You" : (message.username || "User");
         header.appendChild(senderSpan);
         bubble.appendChild(header);
+        if (message.deleted_at) {
+          const deletedText = document.createElement("div");
+          deletedText.className = "message-text deleted-message";
+          deletedText.textContent = "This message was deleted.";
+          bubble.appendChild(deletedText);
+
+          item.appendChild(bubble);
+          messages.appendChild(item);
+          return;
+      }
 
         // Attachment handling (CHAT-F-040)
         const att = message.attachment || (message.attachment_filename ? {
@@ -649,6 +683,16 @@
           status.textContent = `(${currentStatus})`;
 
           metaDiv.appendChild(status);
+
+          const deleteButton = document.createElement("button");
+          deleteButton.type = "button";
+          deleteButton.className = "delete-message-btn";
+          deleteButton.textContent = "Delete";
+          deleteButton.addEventListener("click", () => {
+              deleteMessage(messageId);
+          });
+
+          metaDiv.appendChild(deleteButton);
           bubble.appendChild(metaDiv);
 
           ownMessages.set(messageId, status);
@@ -673,6 +717,16 @@
           unreadIncoming.add(messageId);
           flushReadReceipts();
         }
+      }
+
+      function deleteMessage(messageId) {
+        if (!confirm("Are you sure you want to delete this message?")) {
+            return;
+        }
+
+        socket.emit("delete message", {
+            message_id: messageId
+        });
       }
 
       form.addEventListener("submit", async (event) => {
@@ -814,9 +868,22 @@
 
       recipient.addEventListener("change", () => {
         const to = recipient.value.trim();
+
         if (to && to.toLowerCase() !== currentUsername.toLowerCase()) {
-          requestPresence(to);
-        }
+            requestPresence(to);
+            loadChatHistory(to);
+        } else {
+            messages.innerHTML = "";
+            renderedMessages.clear();
+            unreadIncoming.clear();
+
+            if (emptyState) {
+                emptyState.style.display = "block";
+                emptyState.textContent = "Select a conversation to start chatting.";
+            }
+
+            clearPresenceIndicator();
+          }
       });
 
       recipient.addEventListener("blur", () => {
@@ -871,6 +938,64 @@
 
         addMessage(message, false);
       });
+      socket.on("chat history", (data) => {
+        if (!data || !Array.isArray(data.messages)) return;
+
+        const selectedUser = recipient.value.trim().toLowerCase();
+
+        if (!selectedUser ||
+            data.recipient.toLowerCase() !== selectedUser) {
+            return;
+        }
+
+        messages.innerHTML = "";
+        renderedMessages.clear();
+        unreadIncoming.clear();
+        pendingStatuses.clear();
+        ownMessages.clear();
+
+        if (data.messages.length === 0) {
+            if (emptyState) {
+                emptyState.style.display = "block";
+                emptyState.textContent = "No previous messages. Start chatting!";
+            }
+            return;
+        }
+
+        if (emptyState) {
+            emptyState.style.display = "none";
+        }
+
+        data.messages.forEach((message) => {
+            const isOwn = message.username.toLowerCase() === currentUsername.toLowerCase();
+
+            addMessage(message, isOwn);
+        });
+    });
+
+      socket.on("message deleted", (data) => {
+        if (!data || data.message_id == null) return;
+
+        const item = messages.querySelector(
+            `[data-message-id="${data.message_id}"]`
+        );
+
+        if (!item) return;
+
+        const bubble = item.querySelector(".message-bubble");
+        if (!bubble) return;
+
+        bubble.innerHTML = "";
+
+        const deletedText = document.createElement("div");
+        deletedText.className = "message-text deleted-message";
+        deletedText.textContent = "This message was deleted.";
+
+        bubble.appendChild(deletedText);
+
+        ownMessages.delete(String(data.message_id));
+        unreadIncoming.delete(String(data.message_id));
+    });
 
       // Delivery and read receipt updates.
       socket.on("message status", (update) => {

@@ -280,6 +280,64 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_unread
             ON messages(recipient_id, sender_id, read_at)
         """)
+                # Group chat tables
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(created_by) REFERENCES users(id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                joined_at TEXT NOT NULL,
+                UNIQUE(group_id, user_id),
+                FOREIGN KEY(group_id) REFERENCES groups(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_members_user
+            ON group_members(user_id, group_id)
+        """)
+
+        # Group messages table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS group_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1000),
+                created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE,
+                FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Add deleted_at to existing group_messages tables
+        columns = [
+            row["name"]
+            for row in db.execute("PRAGMA table_info(group_messages)").fetchall()
+        ]
+
+        if "deleted_at" not in columns:
+            db.execute("ALTER TABLE group_messages ADD COLUMN deleted_at TEXT")
+
+        db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_messages_history
+            ON group_messages(group_id, id)
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -1011,6 +1069,524 @@ def handle_load_chat_history(data):
         "messages": history
     })
 
+@socketio.on("create group")
+def handle_create_group(data):
+    creator_id = sid_to_user.get(request.sid)
+
+    if not creator_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    group_name = str(data.get("name", "")).strip()
+    member_usernames = data.get("members", [])
+
+    if not group_name or len(group_name) > 50:
+        emit("chat error", {"message": "Group name must be 1–50 characters."})
+        return
+
+    if not isinstance(member_usernames, list) or len(member_usernames) > 49:
+        emit("chat error", {"message": "Invalid group members."})
+        return
+
+    member_usernames = list({
+        str(name).strip()
+        for name in member_usernames
+        if isinstance(name, str) and name.strip()
+    })
+    print("DEBUG - Received group members:", member_usernames)
+
+    with get_db() as db:
+        creator = db.execute(
+            "SELECT id, username FROM users WHERE id = ?",
+            (creator_id,)
+        ).fetchone()
+
+        if creator is None:
+            emit("chat error", {"message": "User not found."})
+            return
+
+        placeholders = ",".join("?" for _ in member_usernames)
+
+        if member_usernames:
+            members = db.execute(
+                f"""
+                SELECT id, username FROM users
+                WHERE username COLLATE NOCASE IN ({placeholders})
+                """,
+                member_usernames
+            ).fetchall()
+            print("DEBUG - Matched database members:", [dict(m) for m in members])
+        else:
+            members = []
+
+        if len(members) != len(member_usernames):
+            emit("chat error", {"message": "One or more members were not found."})
+            return
+
+        all_members = {creator["id"]: creator["username"]}
+
+        for member in members:
+            all_members[member["id"]] = member["username"]
+
+        cursor = db.execute(
+            """
+            INSERT INTO groups (name, created_by, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (group_name, creator_id, utc_now())
+        )
+
+        group_id = cursor.lastrowid
+
+        for member_id in all_members:
+            db.execute(
+                """
+                INSERT INTO group_members
+                    (group_id, user_id, joined_at)
+                VALUES (?, ?, ?)
+                """,
+                (group_id, member_id, utc_now())
+            )
+
+    group_payload = {
+        "group_id": group_id,
+        "name": group_name,
+        "created_by": creator_id,
+        "members": list(all_members.values())
+    }
+
+    for member_id in all_members:
+        socketio.emit(
+            "group created",
+            group_payload,
+            to=user_room(member_id)
+        )
+
+@socketio.on("add group member")
+def handle_add_group_member(data):
+    requester_id = sid_to_user.get(request.sid)
+
+    if not requester_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        group_id = int(data.get("group_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid group."})
+        return
+
+    username = str(data.get("username", "")).strip()
+
+    if not username:
+        emit("chat error", {"message": "Username is required."})
+        return
+
+    with get_db() as db:
+        group = db.execute(
+            "SELECT id, name, created_by FROM groups WHERE id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None:
+            emit("chat error", {"message": "Group not found."})
+            return
+
+        if group["created_by"] != requester_id:
+            emit("chat error", {"message": "Only the group admin can add members."})
+            return
+
+        user = db.execute(
+            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE",
+            (username,)
+        ).fetchone()
+
+        if user is None:
+            emit("chat error", {"message": "User not found."})
+            return
+
+        existing = db.execute(
+            """
+            SELECT 1 FROM group_members
+            WHERE group_id = ? AND user_id = ?
+            """,
+            (group_id, user["id"])
+        ).fetchone()
+
+        if existing:
+            emit("chat error", {"message": "User is already a group member."})
+            return
+
+        db.execute(
+            """
+            INSERT INTO group_members (group_id, user_id, joined_at)
+            VALUES (?, ?, ?)
+            """,
+            (group_id, user["id"], utc_now())
+        )
+
+        member_rows = db.execute(
+            """
+            SELECT u.id, u.username
+            FROM group_members gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ?
+            """,
+            (group_id,)
+        ).fetchall()
+
+    payload = {
+        "group_id": group_id,
+        "name": group["name"],
+        "members": [row["username"] for row in member_rows],
+        "added_member": user["username"]
+    }
+
+    for member in member_rows:
+        socketio.emit("group members updated", payload, to=user_room(member["id"]))
+
+
+@socketio.on("remove group member")
+def handle_remove_group_member(data):
+    requester_id = sid_to_user.get(request.sid)
+
+    if not requester_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        group_id = int(data.get("group_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid group."})
+        return
+
+    username = str(data.get("username", "")).strip()
+
+    if not username:
+        emit("chat error", {"message": "Username is required."})
+        return
+
+    with get_db() as db:
+        group = db.execute(
+            "SELECT id, name, created_by FROM groups WHERE id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None:
+            emit("chat error", {"message": "Group not found."})
+            return
+
+        if group["created_by"] != requester_id:
+            emit("chat error", {"message": "Only the group admin can remove members."})
+            return
+
+        user = db.execute(
+            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE",
+            (username,)
+        ).fetchone()
+
+        if user is None:
+            emit("chat error", {"message": "User not found."})
+            return
+
+        if user["id"] == group["created_by"]:
+            emit("chat error", {"message": "The group admin cannot remove themselves."})
+            return
+
+        cursor = db.execute(
+            """
+            DELETE FROM group_members
+            WHERE group_id = ? AND user_id = ?
+            """,
+            (group_id, user["id"])
+        )
+
+        if cursor.rowcount == 0:
+            emit("chat error", {"message": "User is not a group member."})
+            return
+
+        member_rows = db.execute(
+            """
+            SELECT u.id, u.username
+            FROM group_members gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ?
+            """,
+            (group_id,)
+        ).fetchall()
+
+    payload = {
+        "group_id": group_id,
+        "name": group["name"],
+        "members": [row["username"] for row in member_rows],
+        "removed_member": user["username"]
+    }
+
+    socketio.emit("group member removed", payload, to=user_room(user["id"]))
+
+    for member in member_rows:
+        socketio.emit("group members updated", payload, to=user_room(member["id"]))
+
+@socketio.on("leave group")
+def handle_leave_group(data):
+    user_id = sid_to_user.get(request.sid)
+
+    if not user_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        group_id = int(data.get("group_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid group."})
+        return
+
+    with get_db() as db:
+        group = db.execute(
+            "SELECT id, name, created_by FROM groups WHERE id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None:
+            emit("chat error", {"message": "Group not found."})
+            return
+
+        if group["created_by"] == user_id:
+            emit("chat error", {
+                "message": "The group admin cannot leave without transferring admin rights or deleting the group."
+            })
+            return
+
+        cursor = db.execute(
+            """
+            DELETE FROM group_members
+            WHERE group_id = ? AND user_id = ?
+            """,
+            (group_id, user_id)
+        )
+
+        if cursor.rowcount == 0:
+            emit("chat error", {"message": "You are not a member of this group."})
+            return
+
+        member_rows = db.execute(
+            """
+            SELECT u.id, u.username
+            FROM group_members gm
+            JOIN users u ON u.id = gm.user_id
+            WHERE gm.group_id = ?
+            """,
+            (group_id,)
+        ).fetchall()
+
+    payload = {
+        "group_id": group_id,
+        "name": group["name"],
+        "members": [row["username"] for row in member_rows],
+        "left_user": user_id
+    }
+
+    socketio.emit("group member left", payload, to=user_room(user_id))
+
+    for member in member_rows:
+        socketio.emit("group members updated", payload, to=user_room(member["id"]))
+
+@socketio.on("group message")
+def handle_group_message(data):
+    sender_id = sid_to_user.get(request.sid)
+
+    if not sender_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        group_id = int(data.get("group_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid group."})
+        return
+
+    message_text = str(data.get("text", "")).strip()
+
+    if not message_text or len(message_text) > 1000:
+        emit("chat error", {
+            "message": "Message must be between 1 and 1000 characters."
+        })
+        return
+
+    with get_db() as db:
+        membership = db.execute(
+            """
+            SELECT 1 FROM group_members
+            WHERE group_id = ? AND user_id = ?
+            """,
+            (group_id, sender_id)
+        ).fetchone()
+
+        if membership is None:
+            emit("chat error", {
+                "message": "You are not a member of this group."
+            })
+            return
+
+        sender = db.execute(
+            "SELECT username FROM users WHERE id = ?",
+            (sender_id,)
+        ).fetchone()
+
+        group = db.execute(
+            "SELECT name FROM groups WHERE id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None or sender is None:
+            emit("chat error", {"message": "Group or user not found."})
+            return
+
+        cursor = db.execute(
+            """
+            INSERT INTO group_messages
+                (group_id, sender_id, text, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (group_id, sender_id, message_text, utc_now())
+        )
+
+        message = {
+            "id": cursor.lastrowid,
+            "group_id": group_id,
+            "sender_id": sender_id,
+            "sender_username": sender["username"],
+            "text": message_text,
+            "created_at": utc_now()
+        }
+
+        members = db.execute(
+            """
+            SELECT user_id FROM group_members
+            WHERE group_id = ?
+            """,
+            (group_id,)
+        ).fetchall()
+
+    for member in members:
+        socketio.emit(
+            "group message",
+            message,
+            to=user_room(member["user_id"])
+        )
+@socketio.on("load groups")
+def handle_load_groups():
+    user_id = sid_to_user.get(request.sid)
+
+    if not user_id:
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    with get_db() as db:
+        groups = db.execute(
+            """
+            SELECT
+                g.id,
+                g.name,
+                g.created_by,
+                creator.username AS creator_username
+            FROM groups g
+            JOIN group_members gm ON gm.group_id = g.id
+            JOIN users creator ON creator.id = g.created_by
+            WHERE gm.user_id = ?
+            ORDER BY g.id DESC
+            """,
+            (user_id,)
+        ).fetchall()
+
+        group_list = []
+
+        for group in groups:
+            members = db.execute(
+                """
+                SELECT u.username
+                FROM group_members gm
+                JOIN users u ON u.id = gm.user_id
+                WHERE gm.group_id = ?
+                ORDER BY u.username
+                """,
+                (group["id"],)
+            ).fetchall()
+
+            group_list.append({
+                "creator_username": group["creator_username"],
+                "group_id": group["id"],
+                "name": group["name"],
+                "created_by": group["created_by"],
+                "members": [member["username"] for member in members]
+            })
+
+    emit("groups list", {"groups": group_list})
+
+@socketio.on("load group history")
+def handle_load_group_history(data):
+    requester_id = sid_to_user.get(request.sid)
+
+    if not requester_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized history request."})
+        return
+
+    try:
+        group_id = int(data.get("group_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid group."})
+        return
+
+    with get_db() as db:
+        membership = db.execute(
+            """
+            SELECT 1 FROM group_members
+            WHERE group_id = ? AND user_id = ?
+            """,
+            (group_id, requester_id)
+        ).fetchone()
+
+        if membership is None:
+            emit("chat error", {
+                "message": "You are not a member of this group."
+            })
+            return
+
+        group = db.execute(
+            "SELECT name FROM groups WHERE id = ?",
+            (group_id,)
+        ).fetchone()
+
+        if group is None:
+            emit("chat error", {"message": "Group not found."})
+            return
+
+        rows = db.execute(
+            """
+            SELECT
+                gm.id,
+                gm.group_id,
+                gm.sender_id,
+                u.username AS sender_username,
+                gm.text,
+                gm.created_at,
+                gm.deleted_at
+            FROM group_messages gm
+            JOIN users u ON u.id = gm.sender_id
+            WHERE gm.group_id = ?
+            ORDER BY gm.id ASC
+            """,
+            (group_id,)
+        ).fetchall()
+
+        history = [dict(row) for row in rows]
+
+    emit("group history", {
+        "group_id": group_id,
+        "group_name": group["name"],
+        "messages": history
+    })
+
 @socketio.on("delete message")
 def handle_delete_message(data):
     user_id = sid_to_user.get(request.sid)
@@ -1061,6 +1637,85 @@ def handle_delete_message(data):
 
     socketio.emit("message deleted", deletion_payload, to=user_room(user_id))
     socketio.emit("message deleted", deletion_payload, to=user_room(recipient_id))
+
+
+@socketio.on("delete group message")
+def handle_delete_group_message(data):
+    user_id = sid_to_user.get(request.sid)
+
+    if not user_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        message_id = int(data.get("message_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid message."})
+        return
+
+    with get_db() as db:
+        message = db.execute(
+            """
+            SELECT id, group_id, sender_id, created_at, deleted_at
+            FROM group_messages
+            WHERE id = ?
+            """,
+            (message_id,)
+        ).fetchone()
+
+        if message is None or message["sender_id"] != user_id:
+            emit("chat error", {
+                "message": "You can only delete your own group messages."
+            })
+            return
+
+        if message["deleted_at"] is not None:
+            emit("chat error", {"message": "Message is already deleted."})
+            return
+
+        created_at = datetime.fromisoformat(message["created_at"])
+        age_seconds = (
+            datetime.now(timezone.utc) - created_at
+        ).total_seconds()
+
+        if age_seconds > MESSAGE_DELETE_WINDOW_MINUTES * 60:
+            emit("chat error", {
+                "message": "The 15-minute deletion time limit has expired."
+            })
+            return
+
+        deleted_at = utc_now()
+
+        db.execute(
+            """
+            UPDATE group_messages
+            SET deleted_at = ?
+            WHERE id = ?
+            """,
+            (deleted_at, message_id)
+        )
+
+        members = db.execute(
+            """
+            SELECT user_id FROM group_members
+            WHERE group_id = ?
+            """,
+            (message["group_id"],)
+        ).fetchall()
+
+    payload = {
+        "message_id": message_id,
+        "group_id": message["group_id"],
+        "deleted_at": deleted_at
+    }
+
+    for member in members:
+        socketio.emit(
+            "group message deleted",
+            payload,
+            to=user_room(member["user_id"])
+        )
+
 
 @socketio.on("message read")
 def handle_message_read(data):

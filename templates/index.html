@@ -61,6 +61,61 @@
           </div>
         </div>
 
+        <!-- Group Chat Controls -->
+        <div class="group-chat-controls">
+            <h3>Group Chats</h3>
+
+            <div class="group-create-form">
+                <input
+                    type="text"
+                    id="group-name"
+                    placeholder="Enter group name"
+                    maxlength="50"
+                />
+
+                <input
+                    type="text"
+                    id="group-members"
+                    placeholder="Member usernames (comma separated)"
+                />
+
+                <button type="button" id="create-group-button">
+                    Create Group
+                </button>
+            </div>
+
+            <div class="group-list-section">
+                <label for="group-list">Your Groups:</label>
+                <select id="group-list">
+                    <option value="">Select a group</option>
+                </select>
+            </div>
+            <div id="selected-group-info" style="display: none;">
+                <h3 id="selected-group-name"></h3>
+                <p id="selected-group-admin"></p>
+            </div>
+            <!-- Group Member Management -->
+            <div class="group-management-controls">
+                <input
+                    type="text"
+                    id="group-member-username"
+                    placeholder="Enter username"
+                />
+
+                <button type="button" id="add-group-member">
+                    Add Member
+                </button>
+
+                <button type="button" id="remove-group-member">
+                    Remove Member
+                </button>
+
+                <button type="button" id="leave-group">
+                    Leave Group
+                </button>
+            </div>
+        </div>
+
         <!-- Missed-Messages Banner (CHAT-F-031) -->
         <div id="missed-messages-banner" class="missed-banner hidden" role="region" aria-label="Missed messages notification">
           <div class="missed-banner-inner">
@@ -201,6 +256,26 @@
       const filePreviewSize = document.getElementById("file-preview-size");
       const fileRemoveButton = document.getElementById("file-remove-button");
       const recipient = document.getElementById("recipient");
+      // Group chat elements
+      const groupNameInput = document.getElementById("group-name");
+      const groupMembersInput = document.getElementById("group-members");
+      const createGroupButton = document.getElementById("create-group-button");
+      const groupList = document.getElementById("group-list");
+      // Group management elements
+      const groupMemberUsername = document.getElementById("group-member-username");
+      const addGroupMemberButton = document.getElementById("add-group-member");
+      const removeGroupMemberButton = document.getElementById("remove-group-member");
+      const leaveGroupButton = document.getElementById("leave-group");
+      const selectedGroupInfo = document.getElementById("selected-group-info");
+      const selectedGroupName = document.getElementById("selected-group-name");
+      const selectedGroupAdmin = document.getElementById("selected-group-admin");
+
+      // Currently selected group
+      let selectedGroupId = null;
+
+      // Store group details for admin permission checks
+      let groupDetails = new Map();
+
       const recipientPresence = document.getElementById("recipient-presence");
       const recipientPresenceDot = document.getElementById("recipient-presence-dot");
       const recipientPresenceText = document.getElementById("recipient-presence-text");
@@ -453,6 +528,231 @@
         if (activeTarget && activeTarget.toLowerCase() !== currentUsername.toLowerCase()) {
           requestPresence(activeTarget);
         }
+      });
+
+      // Load the user's groups when connected
+      socket.emit("load groups");
+
+      // Refresh groups when group membership changes
+      socket.on("group created", () => {
+          socket.emit("load groups");
+      });
+
+      socket.on("group members updated", () => {
+          socket.emit("load groups");
+      });
+
+      socket.on("group member removed", () => {
+          socket.emit("load groups");
+      });
+
+      socket.on("group member left", (data) => {
+        if (data && Number(data.group_id) === selectedGroupId) {
+            selectedGroupId = null;
+            messages.innerHTML = "";
+
+            if (emptyState) {
+                emptyState.style.display = "block";
+            }
+
+            recipient.disabled = false;
+        }
+
+        socket.emit("load groups");
+    });
+
+    // Handle being removed from a group
+    socket.on("group member removed", (data) => {
+        if (data && Number(data.group_id) === selectedGroupId) {
+            selectedGroupId = null;
+            messages.innerHTML = "";
+
+            if (emptyState) {
+                emptyState.style.display = "block";
+            }
+
+            recipient.disabled = false;
+        }
+
+        socket.emit("load groups");
+    });
+
+      // Display the groups returned by the server
+      socket.on("groups list", (data) => {
+        groupList.innerHTML = '<option value="">Select a group</option>';
+
+        if (!data || !Array.isArray(data.groups)) {
+            console.error("Invalid groups list:", data);
+            return;
+        }
+
+        groupDetails.clear();
+
+        data.groups.forEach((group) => {
+            groupDetails.set(Number(group.group_id), group);
+
+            const option = document.createElement("option");
+
+            option.value = group.group_id;
+            option.textContent = group.name;
+
+            groupList.appendChild(option);
+        });
+
+        // Restore the selected group after refreshing the list
+        if (selectedGroupId !== null) {
+            const selectedOption = [...groupList.options].find(
+                option => Number(option.value) === selectedGroupId
+            );
+
+            if (selectedOption) {
+                groupList.value = String(selectedGroupId);
+            } else {
+                selectedGroupId = null;
+                selectedGroupInfo.style.display = "none";
+            }
+        }
+    });
+
+      // Create a new group
+      createGroupButton.addEventListener("click", () => {
+          const name = groupNameInput.value.trim();
+
+          const members = groupMembersInput.value
+              .split(",")
+              .map(username => username.trim())
+              .filter(username => username.length > 0);
+
+          if (!name) {
+              alert("Please enter a group name.");
+              return;
+          }
+
+          socket.emit("create group", {
+              name: name,
+              members: members
+          });
+      });
+
+      // Add a member to the selected group
+      addGroupMemberButton.addEventListener("click", () => {
+          if (selectedGroupId === null) {
+              notice.textContent = "Please select a group first.";
+              return;
+          }
+
+          const username = groupMemberUsername.value.trim();
+
+          if (!username) {
+              notice.textContent = "Enter a username.";
+              return;
+          }
+
+          socket.emit("add group member", {
+              group_id: selectedGroupId,
+              username: username
+          });
+
+          groupMemberUsername.value = "";
+          notice.textContent = "Add member request sent.";
+      });
+
+      // Add Member handler
+      addGroupMemberButton.addEventListener("click", () => {
+          // existing code...
+      });
+
+      // Remove a member from the selected group
+      removeGroupMemberButton.addEventListener("click", () => {
+          if (selectedGroupId === null) {
+              notice.textContent = "Please select a group first.";
+              return;
+          }
+
+          const username = groupMemberUsername.value.trim();
+
+          if (!username) {
+              notice.textContent = "Enter the username to remove.";
+              return;
+          }
+
+          if (!confirm(`Remove ${username} from this group?`)) {
+              return;
+          }
+
+          socket.emit("remove group member", {
+              group_id: selectedGroupId,
+              username: username
+          });
+
+          groupMemberUsername.value = "";
+          notice.textContent = "Remove member request sent.";
+      });
+
+
+      
+      // Leave the selected group
+      leaveGroupButton.addEventListener("click", () => {
+          if (selectedGroupId === null) {
+              notice.textContent = "Please select a group first.";
+              return;
+          }
+
+          if (!confirm("Are you sure you want to leave this group?")) {
+              return;
+          }
+
+          socket.emit("leave group", {
+              group_id: selectedGroupId
+          });
+      });
+
+
+      // Handle group selection
+      groupList.addEventListener("change", () => {
+          selectedGroupId = groupList.value
+              ? Number(groupList.value)
+              : null;
+
+              // Display selected group information
+              const group = groupDetails.get(selectedGroupId);
+
+              if (group) {
+                  selectedGroupInfo.style.display = "block";
+                  selectedGroupName.textContent = group.name;
+                  selectedGroupAdmin.textContent =
+                      "Group Admin: " + group.creator_username;
+
+                  const isAdmin =
+                      group.creator_username.toLowerCase() ===
+                      currentUsername.toLowerCase();
+
+                  // Only the creator can add or remove members
+                  groupMemberUsername.style.display = isAdmin ? "block" : "none";
+                  addGroupMemberButton.style.display = isAdmin ? "inline-block" : "none";
+                  removeGroupMemberButton.style.display = isAdmin ? "inline-block" : "none";
+
+                  // The creator cannot leave under the current backend rules
+                  leaveGroupButton.style.display = isAdmin ? "none" : "inline-block";
+              } else {
+                  selectedGroupInfo.style.display = "none";
+              }
+
+              // Switch between direct chat and group chat
+              if (selectedGroupId !== null) {
+                  recipient.disabled = true;
+                  recipient.value = "";
+              } else {
+                  recipient.disabled = false;
+              }
+
+          messages.innerHTML = "";
+
+          if (selectedGroupId !== null) {
+              socket.emit("load group history", {
+                  group_id: selectedGroupId
+              });
+          }
       });
 
       socket.on("connect_error", (err) => {
@@ -719,6 +1019,82 @@
         }
       }
 
+      // Render group chat messages
+      function addGroupMessage(message) {
+          if (!message || typeof message.text !== "string") {
+              return;
+          }
+
+          if (emptyState) {
+              emptyState.style.display = "none";
+          }
+
+          const item = document.createElement("li");
+
+          const senderUsername = message.sender_username || message.username || "";
+
+          const isOwn = senderUsername.toLowerCase() ===
+              currentUsername.toLowerCase();
+
+          item.className = `message-item ${
+              isOwn ? "message-outgoing" : "message-incoming"
+          }`;
+          
+          if (message.id != null) {
+            item.dataset.groupMessageId = String(message.id);
+          }
+
+          const bubble = document.createElement("div");
+          bubble.className = "message-bubble";
+
+          const header = document.createElement("div");
+          header.className = "message-header";
+
+          const sender = document.createElement("span");
+          sender.className = "message-sender";
+          sender.textContent = isOwn ? "You" : (senderUsername || "User");
+
+          header.appendChild(sender);
+          bubble.appendChild(header);
+
+          const textDiv = document.createElement("div");
+          textDiv.className = "message-text";
+
+          if (message.deleted_at) {
+              textDiv.classList.add("deleted-message");
+              textDiv.textContent = "This message was deleted.";
+          } else {
+              textDiv.textContent = message.text;
+          }
+
+          bubble.appendChild(textDiv);
+
+          // Delete button for your own group messages
+          if (isOwn && message.id && !message.deleted_at) {
+              const deleteButton = document.createElement("button");
+
+              deleteButton.type = "button";
+              deleteButton.className = "delete-message-btn";
+              deleteButton.textContent = "Delete";
+
+              deleteButton.addEventListener("click", () => {
+                  socket.emit("delete group message", {
+                      message_id: message.id
+                  });
+              });
+
+              bubble.appendChild(deleteButton);
+          }
+          item.appendChild(bubble);
+          messages.appendChild(item);
+
+          if (messagesContainer) {
+              messagesContainer.scrollTop = messagesContainer.scrollHeight;
+          }
+
+          messages.scrollTop = messages.scrollHeight;
+      }
+
       function deleteMessage(messageId) {
         if (!confirm("Are you sure you want to delete this message?")) {
             return;
@@ -729,120 +1105,152 @@
         });
       }
 
+     
       form.addEventListener("submit", async (event) => {
-        event.preventDefault();
+          event.preventDefault();
 
-        const text = input.value.trim();
-        const to = recipient.value.trim();
-        const file = fileInput && fileInput.files && fileInput.files[0];
+          const text = input.value.trim();
+          const to = recipient.value.trim();
+          const file = fileInput && fileInput.files && fileInput.files[0];
 
-        if (!to) {
-          notice.textContent = "Please enter a recipient username.";
-          recipient.focus();
-          return;
-        }
+          // GROUP CHAT
+          if (selectedGroupId !== null) {
+              if (file) {
+                  notice.textContent = "File sharing is not available in group chats yet.";
+                  return;
+              }
 
-        if (to.toLowerCase() === currentUsername.toLowerCase()) {
-          notice.textContent = "You cannot send a message to yourself.";
-          return;
-        }
+              if (!text) {
+                  notice.textContent = "Please enter a message to send.";
+                  input.focus();
+                  return;
+              }
 
-        // If no file is selected, preserve the existing text-message Socket.IO path exactly.
-        if (!file) {
-          if (!text) {
-            notice.textContent = "Please enter a message to send.";
-            input.focus();
-            return;
+              notice.textContent = "";
+
+              socket.emit("group message", {
+                  group_id: selectedGroupId,
+                  text: text
+              });
+
+              input.value = "";
+              input.focus();
+              return;
           }
 
+          // DIRECT MESSAGE
+          if (!to) {
+              notice.textContent = "Please enter a recipient username.";
+              recipient.focus();
+              return;
+          }
+
+          if (to.toLowerCase() === currentUsername.toLowerCase()) {
+              notice.textContent = "You cannot send a message to yourself.";
+              return;
+          }
+
+          // Text message
+          if (!file) {
+              if (!text) {
+                  notice.textContent = "Please enter a message to send.";
+                  input.focus();
+                  return;
+              }
+
+              notice.textContent = "";
+
+              if (sendButton) {
+                  sendButton.disabled = true;
+                  setTimeout(() => {
+                      sendButton.disabled = false;
+                  }, 200);
+              }
+
+              socket.emit("typing", {
+                  recipient: to,
+                  is_typing: false
+              });
+
+              socket.emit("chat message", {
+                  recipient: to,
+                  text: text
+              });
+
+              input.value = "";
+              input.focus();
+              return;
+          }
+
+          // File upload path via POST /upload
           notice.textContent = "";
 
-          // Temporarily disable the button to avoid accidental duplicate submissions
+          if (sendButton) sendButton.disabled = true;
+          if (attachButton) attachButton.disabled = true;
+
+          const originalButtonText = sendButton ? sendButton.textContent : "Send";
+
           if (sendButton) {
-            sendButton.disabled = true;
-            setTimeout(() => {
-              sendButton.disabled = false;
-            }, 200);
+              sendButton.textContent = "Uploading...";
           }
 
-          socket.emit("typing", {
-            recipient: to,
-            is_typing: false
-          });
+          const formData = new FormData();
+          formData.append("recipient", to);
+          formData.append("file", file);
 
-          socket.emit("chat message", {
-            recipient: to,
-            text: text
-          });
+          if (text) {
+              formData.append("text", text);
+          }
 
-          input.value = "";
-          input.focus();
-          return;
-        }
-
-        // File upload path via POST /upload
-        notice.textContent = "";
-        if (sendButton) {
-          sendButton.disabled = true;
-        }
-        if (attachButton) {
-          attachButton.disabled = true;
-        }
-        const originalButtonText = sendButton ? sendButton.textContent : "Send";
-        if (sendButton) {
-          sendButton.textContent = "Uploading...";
-        }
-
-        const formData = new FormData();
-        formData.append("recipient", to);
-        formData.append("file", file);
-        if (text) {
-          formData.append("text", text);
-        }
-
-        try {
-          const res = await fetch("/upload", {
-            method: "POST",
-            body: formData,
-            credentials: "same-origin"
-          });
-
-          let data = null;
           try {
-            data = await res.json();
-          } catch (_jsonErr) {
-            // JSON parse failed
-          }
+              const res = await fetch("/upload", {
+                  method: "POST",
+                  body: formData,
+                  credentials: "same-origin"
+              });
 
-          if (!res.ok) {
-            const errMsg = (data && data.error) ? data.error : `Upload failed (${res.status}).`;
-            notice.textContent = errMsg;
-            // Retain the file selection so the user can retry
-            return;
-          }
+              let data = null;
 
-          // Successful upload: clear selection and input
-          notice.textContent = "";
-          input.value = "";
-          clearFileSelection();
+              try {
+                  data = await res.json();
+              } catch (_jsonErr) {
+                  // JSON parse failed
+              }
 
-          // Render immediately (renderedMessages deduplicates incoming socket event)
-          if (data) {
-            addMessage(data, true);
+              if (!res.ok) {
+                  const errMsg = (data && data.error)
+                      ? data.error
+                      : `Upload failed (${res.status}).`;
+
+                  notice.textContent = errMsg;
+                  return;
+              }
+
+              notice.textContent = "";
+              input.value = "";
+              clearFileSelection();
+
+              if (data) {
+                  addMessage(data, true);
+              }
+
+          } catch (_netErr) {
+              notice.textContent = "Network error during upload. Please try again.";
+
+          } finally {
+              if (sendButton) {
+                  sendButton.disabled = false;
+                  sendButton.textContent = originalButtonText;
+              }
+
+              if (attachButton) {
+                  attachButton.disabled = false;
+              }
+
+              input.focus();
           }
-        } catch (_netErr) {
-          notice.textContent = "Network error during upload. Please try again.";
-        } finally {
-          if (sendButton) {
-            sendButton.disabled = false;
-            sendButton.textContent = originalButtonText;
-          }
-          if (attachButton) {
-            attachButton.disabled = false;
-          }
-          input.focus();
-        }
       });
+
 
       recipient.addEventListener("input", () => {
         clearTimeout(presenceDebounce);
@@ -972,6 +1380,61 @@
             addMessage(message, isOwn);
         });
     });
+
+      // Receive group chat history
+      socket.on("group history", (data) => {
+          if (!data || Number(data.group_id) !== selectedGroupId) {
+              return;
+          }
+
+          messages.innerHTML = "";
+
+          if (emptyState) {
+              emptyState.style.display =
+                  data.messages.length === 0 ? "block" : "none";
+          }
+
+          data.messages.forEach((message) => {
+              addGroupMessage(message);
+          });
+      });
+
+      // Receive new group messages
+      socket.on("group message", (message) => {
+          if (!message || Number(message.group_id) !== selectedGroupId) {
+              return;
+          }
+
+          addGroupMessage(message);
+      });
+
+      // Handle real-time group message deletion
+      socket.on("group message deleted", (data) => {
+          if (!data || Number(data.group_id) !== selectedGroupId) {
+              return;
+          }
+
+          const messageElement = messages.querySelector(
+              `[data-group-message-id="${data.message_id}"]`
+          );
+
+          if (!messageElement) {
+              return;
+          }
+
+          const textDiv = messageElement.querySelector(".message-text");
+
+          if (textDiv) {
+              textDiv.textContent = "This message was deleted.";
+              textDiv.classList.add("deleted-message");
+          }
+
+          const deleteButton = messageElement.querySelector(".delete-message-btn");
+
+          if (deleteButton) {
+              deleteButton.remove();
+          }
+      });
 
       socket.on("message deleted", (data) => {
         if (!data || data.message_id == null) return;

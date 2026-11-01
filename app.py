@@ -3,9 +3,12 @@ import re
 import ssl
 import sqlite3
 import threading
+import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from math import ceil
 from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,6 +28,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+# CHAT-F rate limiting master switch. Enabled by default. Set CHAT_RATE_LIMITS=0
+# only for local load tests (it also switches off the HTTP limits on /login and
+# /ws-token, which a 100-client test from one IP would otherwise trip).
+RATE_LIMITS_ENABLED = os.environ.get("CHAT_RATE_LIMITS", "1") != "0"
+app.config["RATELIMIT_ENABLED"] = RATE_LIMITS_ENABLED
 
 limiter = Limiter(
     get_remote_address,
@@ -46,7 +55,7 @@ app.config["SECRET_KEY"] = os.environ.get(
 
 DEBUG = os.environ.get("CHAT_DEBUG", "1") == "1"
 BEHIND_PROXY = os.environ.get("CHAT_BEHIND_PROXY", "0") == "1"
-HTTPS_HOST = os.environ.get("CHAT_HOST", "127.0.0.1")
+HTTPS_HOST = os.environ.get("CHAT_HOST", "localhost")
 HTTPS_PORT = int(os.environ.get("CHAT_HTTPS_PORT", "5000"))
 HTTP_REDIRECT_PORT = int(os.environ.get("CHAT_HTTP_PORT", "5080"))
 
@@ -60,11 +69,14 @@ KEY_FILE = os.environ.get(
 )
 ALLOWED_ORIGINS = os.environ.get(
     "CHAT_ALLOWED_ORIGINS",
-    f"https://127.0.0.1:{HTTPS_PORT}",
+    f"https://localhost:{HTTPS_PORT},https://127.0.0.1:{HTTPS_PORT}",
 ).split(",")
 
 if not DEBUG and app.config["SECRET_KEY"] == DEFAULT_SECRET:
     raise RuntimeError("Set CHAT_SECRET_KEY before running in production.")
+
+if not DEBUG and not RATE_LIMITS_ENABLED:
+    raise RuntimeError("Rate limits can only be disabled when CHAT_DEBUG=1.")
 
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -130,6 +142,86 @@ MESSAGE_DELETE_WINDOW_MINUTES = 15
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Message-send rate limiting (per user, shared by all of the user's tabs)
+# ---------------------------------------------------------------------------
+# Default: at most 20 messages (direct, group or attachment) per 10 seconds.
+MESSAGE_RATE_LIMIT = int(os.environ.get("CHAT_MSG_RATE_LIMIT", "20"))
+MESSAGE_RATE_WINDOW = float(os.environ.get("CHAT_MSG_RATE_WINDOW", "10"))
+
+
+class SlidingWindowRateLimiter:
+    """Thread-safe sliding-window limiter keyed by an arbitrary value.
+
+    Rejected attempts are not recorded, so a user who keeps hammering the
+    send button is allowed again as soon as their oldest accepted message
+    leaves the window. State is in-process; for multiple workers use a
+    shared store such as Redis.
+    """
+
+    SWEEP_THRESHOLD = 1024  # tracked keys before stale ones are purged
+
+    def __init__(self, limit, window_seconds, clock=time.monotonic):
+        self.limit = limit
+        self.window = window_seconds
+        self._clock = clock
+        self._events = {}
+        self._lock = threading.Lock()
+
+    def check(self, key):
+        """Record an attempt. Return (allowed, retry_after_seconds)."""
+        now = self._clock()
+        cutoff = now - self.window
+        with self._lock:
+            if len(self._events) > self.SWEEP_THRESHOLD:
+                self._sweep(cutoff)
+
+            events = self._events.setdefault(key, deque())
+            while events and events[0] <= cutoff:
+                events.popleft()
+
+            if len(events) >= self.limit:
+                return False, max(events[0] + self.window - now, 0.0)
+
+            events.append(now)
+            return True, 0.0
+
+    def reset(self, key=None):
+        with self._lock:
+            if key is None:
+                self._events.clear()
+            else:
+                self._events.pop(key, None)
+
+    def _sweep(self, cutoff):
+        for key in [k for k, ev in self._events.items()
+                    if not ev or ev[-1] <= cutoff]:
+            del self._events[key]
+
+
+message_rate_limiter = SlidingWindowRateLimiter(
+    MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW
+)
+
+
+def message_rate_limit_wait(user_id):
+    """Return None if the user may send now, else whole seconds to wait."""
+    if not RATE_LIMITS_ENABLED:
+        return None
+    allowed, retry_after = message_rate_limiter.check(user_id)
+    if allowed:
+        return None
+    return max(1, ceil(retry_after))
+
+
+def rate_limit_message(wait_seconds):
+    unit = "second" if wait_seconds == 1 else "seconds"
+    return (
+        "You are sending messages too quickly. "
+        f"Please wait {wait_seconds} {unit} and try again."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -456,12 +548,40 @@ def sanitize_display_filename(filename, ext):
 # ---------------------------------------------------------------------------
 # HTTP routes
 # ---------------------------------------------------------------------------
+def wants_json_response():
+    return (
+        request.path.startswith(("/upload", "/ws-token", "/attachments"))
+        or request.is_json
+        or "application/json" in request.headers.get("Accept", "")
+    )
+
+
+def session_account_is_active():
+    """True if the logged-in user still exists and is not suspended/banned."""
+    with get_db() as db:
+        user = db.execute(
+            "SELECT account_status FROM users WHERE id = ?",
+            (session["user_id"],),
+        ).fetchone()
+    return user is not None and user["account_status"] == "active"
+
+
 def login_required(view):
     @wraps(view)
     def wrapped_view(*args, **kwargs):
         if "user_id" not in session:
             flash("Please log in to continue.", "error")
             return redirect(url_for("login"))
+
+        # A user suspended or banned (or deleted) while logged in must lose
+        # HTTP access immediately, not only their WebSocket connection.
+        if not session_account_is_active():
+            session.clear()
+            if wants_json_response():
+                return jsonify(error="Your account is not active."), 403
+            flash("Your account is not active. Contact an administrator.", "error")
+            return redirect(url_for("login"))
+
         return view(*args, **kwargs)
     return wrapped_view
 
@@ -512,6 +632,11 @@ def ws_token():
     user_id = session.get("user_id")
     if not user_id:
         return jsonify(error="unauthorized"), 401
+
+    # No new socket tokens for suspended or banned accounts.
+    if not session_account_is_active():
+        session.clear()
+        return jsonify(error="unauthorized"), 403
 
     response = jsonify(token=issue_ws_token(user_id))
     response.headers["Cache-Control"] = "no-store"
@@ -595,10 +720,11 @@ def login():
 
         session.clear()
         if user["account_status"] != "active":
-            return jsonify({
-                "success": False,
-                "message": "Your account is suspended or banned. Contact an administrator."
-            }), 403
+            flash(
+                "Your account is suspended or banned. Contact an administrator.",
+                "error",
+            )
+            return render_template("login.html"), 403
         session["user_id"] = user["id"]
         session["username"] = user["username"]
         return redirect(url_for("index"))
@@ -711,6 +837,13 @@ def upload():
     sender_id = session.get("user_id")
     if not sender_id:
         return jsonify(error="Unauthorized"), 401
+
+    wait = message_rate_limit_wait(sender_id)
+    if wait is not None:
+        response = jsonify(error=rate_limit_message(wait), retry_after=wait)
+        response.status_code = 429
+        response.headers["Retry-After"] = str(wait)
+        return response
 
     recipient_username = request.form.get("recipient", "").strip()
     if not recipient_username:
@@ -1126,6 +1259,14 @@ def handle_chat_message(data):
     # Identity comes from the authenticated connection, never the payload.
     sender_id = sid_to_user.get(request.sid)
     if not sender_id or not isinstance(data, dict):
+        return
+
+    wait = message_rate_limit_wait(sender_id)
+    if wait is not None:
+        emit("chat error", {
+            "message": rate_limit_message(wait),
+            "retry_after": wait,
+        })
         return
 
     recipient_username = str(data.get("recipient", "")).strip()
@@ -1556,6 +1697,14 @@ def handle_group_message(data):
         emit("chat error", {"message": "Unauthorized."})
         return
 
+    wait = message_rate_limit_wait(sender_id)
+    if wait is not None:
+        emit("chat error", {
+            "message": rate_limit_message(wait),
+            "retry_after": wait,
+        })
+        return
+
     try:
         group_id = int(data.get("group_id"))
     except (TypeError, ValueError):
@@ -1968,15 +2117,31 @@ def handle_typing(data):
             to=user_room(recipient["id"]),
         )
 
+# ---------------------------------------------------------------------------
+# Dev entry point (HTTPS). In deployment, use gunicorn behind a TLS proxy.
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     init_db()
+
+    if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
+        raise SystemExit(
+            "TLS certificate not found. Create certs/cert.pem and certs/key.pem "
+            "(see the openssl command) or set CHAT_CERT_FILE / CHAT_KEY_FILE."
+        )
+
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2  # no SSLv3 / TLS 1.0 / 1.1
+    tls.load_cert_chain(CERT_FILE, KEY_FILE)
+
+    start_http_redirector()
+
     print("Starting Chat Application...")
     socketio.run(
         app,
-        host=HTTPS_HOST,
+        host="127.0.0.1",
         port=HTTPS_PORT,
-        debug=True,
-        ssl_context=(CERT_FILE, KEY_FILE),
-        allow_unsafe_werkzeug=True
+        debug=DEBUG,
+        use_reloader=False,  # keeps the redirector from starting twice
+        ssl_context=tls,
+        allow_unsafe_werkzeug=True,
     )
-

@@ -126,6 +126,7 @@ if BEHIND_PROXY:
 connected_users = {}
 sid_to_user = {}
 
+MESSAGE_DELETE_WINDOW_MINUTES = 15
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
@@ -259,7 +260,13 @@ def init_db():
         if "attachment_size" not in msg_columns:
             db.execute("ALTER TABLE messages ADD COLUMN attachment_size INTEGER")
         if "attachment_mime" not in msg_columns:
-            db.execute("ALTER TABLE messages ADD COLUMN attachment_mime TEXT")
+            db.execute("ALTER TABLE messages ADD COLUMN attachment_mime TEXT")  
+        # Safe migration: add deleted_at for soft message deletion
+        if "deleted_at" not in msg_columns:
+            db.execute(
+                "ALTER TABLE messages ADD COLUMN deleted_at TEXT"
+            )
+
 
         db.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_recipient_delivery
@@ -676,6 +683,7 @@ def message_payload(row):
         "recipient_username": row["recipient_username"],
         "text": row["text"],
         "created_at": row["created_at"],
+        "deleted_at": row["deleted_at"],
         "status": "read" if row["read_at"] else (
             "delivered" if row["delivered_at"] else "sent"
         ),
@@ -950,6 +958,109 @@ def handle_chat_message(data):
                 mark_message_delivered(mid, sender, *args),
         )
 
+
+@socketio.on("load chat history")
+def handle_load_chat_history(data):
+    # Use the authenticated connection to identify the requester.
+    requester_id = sid_to_user.get(request.sid)
+
+    if not requester_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized history request."})
+        return
+
+    recipient_username = str(data.get("recipient", "")).strip()
+
+    if not recipient_username:
+        emit("chat error", {"message": "Recipient is required."})
+        return
+
+    with get_db() as db:
+        recipient = db.execute(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
+            (recipient_username,)
+        ).fetchone()
+
+        if recipient is None or recipient["id"] == requester_id:
+            emit("chat error", {"message": "Invalid recipient."})
+            return
+
+        # Retrieve only messages exchanged between these two users.
+        rows = db.execute("""
+            SELECT m.*, s.username AS sender_username,
+                   r.username AS recipient_username
+            FROM messages m
+            JOIN users s ON s.id = m.sender_id
+            JOIN users r ON r.id = m.recipient_id
+            WHERE
+                (m.sender_id = ? AND m.recipient_id = ?)
+                OR
+                (m.sender_id = ? AND m.recipient_id = ?)
+            AND m.deleted_at IS NULL
+            ORDER BY m.id ASC
+        """, (
+            requester_id,
+            recipient["id"],
+            recipient["id"],
+            requester_id
+        )).fetchall()
+
+        history = [message_payload(row) for row in rows]
+
+    emit("chat history", {
+        "recipient": recipient_username,
+        "messages": history
+    })
+
+@socketio.on("delete message")
+def handle_delete_message(data):
+    user_id = sid_to_user.get(request.sid)
+
+    if not user_id or not isinstance(data, dict):
+        emit("chat error", {"message": "Unauthorized."})
+        return
+
+    try:
+        message_id = int(data.get("message_id"))
+    except (TypeError, ValueError):
+        emit("chat error", {"message": "Invalid message."})
+        return
+
+    with get_db() as db:
+        message = fetch_message(db, message_id)
+
+        if message is None or message["sender_id"] != user_id:
+            emit("chat error", {"message": "You can only delete your own messages."})
+            return
+
+        if message["deleted_at"] is not None:
+            emit("chat error", {"message": "Message is already deleted."})
+            return
+
+        created_at = datetime.fromisoformat(message["created_at"])
+        age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+
+        if age_seconds > MESSAGE_DELETE_WINDOW_MINUTES * 60:
+            emit("chat error", {
+                "message": "This message cannot be deleted because the 15-minute deletion time limit has expired."
+            })
+            return
+
+        deleted_at = utc_now()
+
+        db.execute(
+            "UPDATE messages SET deleted_at = ? WHERE id = ?",
+            (deleted_at, message_id)
+        )
+
+        recipient_id = message["recipient_id"]
+
+    deletion_payload = {
+        "message_id": message_id,
+        "deleted_at": deleted_at
+    }
+
+    socketio.emit("message deleted", deletion_payload, to=user_room(user_id))
+    socketio.emit("message deleted", deletion_payload, to=user_room(recipient_id))
 
 @socketio.on("message read")
 def handle_message_read(data):

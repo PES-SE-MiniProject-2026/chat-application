@@ -28,6 +28,9 @@
           </div>
 
           <form method="POST" action="{{ url_for('logout') }}">
+            {% if is_admin %}
+              <a href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+              {% endif %}
             <button type="submit" class="btn btn-danger-outline" aria-label="Log out of application">
               Logout
             </button>
@@ -1346,6 +1349,11 @@
 
         addMessage(message, false);
       });
+      socket.on("system announcement", (announcement) => {
+        alert(
+            "📢 SYSTEM ANNOUNCEMENT\n\n" + announcement.message
+        );
+    });
       socket.on("chat history", (data) => {
         if (!data || !Array.isArray(data.messages)) return;
 

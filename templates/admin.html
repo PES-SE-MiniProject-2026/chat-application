@@ -1,0 +1,160 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f7fb;
+            margin: 0;
+            padding: 30px;
+            color: #263247;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: auto;
+        }
+
+        h1, h2 { color: #183153; }
+
+        .panel {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 12px #0000000d;
+        }
+
+        input, select, button {
+            padding: 10px;
+            border: 1px solid #d5dce5;
+            border-radius: 6px;
+            margin: 5px;
+        }
+
+        button {
+            background: #2457a7;
+            color: white;
+            cursor: pointer;
+            border: none;
+        }
+
+        button:hover { opacity: 0.85; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e5eaf0;
+        }
+
+        th { background: #edf3fa; }
+
+        .status { font-weight: bold; }
+        .active { color: green; }
+        .suspended { color: #d97706; }
+        .banned { color: red; }
+
+        .back { display: inline-block; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <a class="back" href="/">← Back to Chat</a>
+
+    <h1>Administration Dashboard</h1>
+    <p>Manage registered users and broadcast announcements.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+            <p>{{ message }}</p>
+        {% endfor %}
+    {% endwith %}
+
+    <div class="panel">
+        <h2>Broadcast Announcement</h2>
+
+        <form method="POST" action="{{ url_for('broadcast_announcement') }}">
+            <input
+                type="text"
+                name="announcement"
+                maxlength="1000"
+                placeholder="Enter announcement"
+                required
+                style="width:70%;"
+            >
+            <button type="submit">Broadcast</button>
+        </form>
+    </div>
+
+    <div class="panel">
+        <h2>User Management</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.email }}</td>
+                    <td>{{ user.role }}</td>
+                    <td class="status {{ user.account_status }}">
+                        {{ user.account_status }}
+                    </td>
+                    <td>
+                        {% if user.role != 'admin' %}
+                        <form method="POST"
+                              action="{{ url_for('update_user_status', user_id=user.id) }}">
+
+                            <select name="status">
+                                <option value="active"
+                                    {% if user.account_status == 'active' %}selected{% endif %}>
+                                    Active
+                                </option>
+
+                                <option value="suspended"
+                                    {% if user.account_status == 'suspended' %}selected{% endif %}>
+                                    Suspend
+                                </option>
+
+                                <option value="banned"
+                                    {% if user.account_status == 'banned' %}selected{% endif %}>
+                                    Ban
+                                </option>
+                            </select>
+
+                            <button type="submit">Update</button>
+                        </form>
+                        {% else %}
+                            Administrator
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+</div>
+</body>
+</html>

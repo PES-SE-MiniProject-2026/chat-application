@@ -1061,9 +1061,11 @@ def handle_load_chat_history(data):
             JOIN users s ON s.id = m.sender_id
             JOIN users r ON r.id = m.recipient_id
             WHERE
+            (
                 (m.sender_id = ? AND m.recipient_id = ?)
                 OR
                 (m.sender_id = ? AND m.recipient_id = ?)
+            )
             AND m.deleted_at IS NULL
             ORDER BY m.id ASC
         """, (
@@ -1774,53 +1776,50 @@ def handle_message_read(data):
 @socketio.on("typing")
 def handle_typing(data):
     sender_id = sid_to_user.get(request.sid)
+
     if not sender_id or not isinstance(data, dict):
         return
 
     recipient_username = str(data.get("recipient", "")).strip()
     is_typing = bool(data.get("is_typing", False))
+
+    if not recipient_username:
+        return
+
     with get_db() as db:
         recipient = db.execute(
             "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
             (recipient_username,),
         ).fetchone()
+
         sender = db.execute(
             "SELECT username FROM users WHERE id = ?",
             (sender_id,),
         ).fetchone()
 
-    if recipient and sender and recipient["id"] != sender_id:
+        if not recipient or not sender or recipient["id"] == sender_id:
+            return
+
+        conversation = db.execute(
+            """
+            SELECT 1 FROM messages
+            WHERE
+                (sender_id = ? AND recipient_id = ?)
+                OR
+                (sender_id = ? AND recipient_id = ?)
+            LIMIT 1
+            """,
+            (
+                sender_id,
+                recipient["id"],
+                recipient["id"],
+                sender_id,
+            ),
+        ).fetchone()
+
+    if conversation:
         emit(
             "typing",
             {"username": sender["username"], "is_typing": is_typing},
             to=user_room(recipient["id"]),
         )
-
-
-# ---------------------------------------------------------------------------
-# Dev entry point (HTTPS). In deployment, use gunicorn behind a TLS proxy.
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    init_db()
-
-    if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
-        raise SystemExit(
-            "TLS certificate not found. Create certs/cert.pem and certs/key.pem "
-            "(see the openssl command) or set CHAT_CERT_FILE / CHAT_KEY_FILE."
-        )
-
-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    tls.minimum_version = ssl.TLSVersion.TLSv1_2  # no SSLv3 / TLS 1.0 / 1.1
-    tls.load_cert_chain(CERT_FILE, KEY_FILE)
-
-    start_http_redirector()
-
-    socketio.run(
-        app,
-        host="127.0.0.1",
-        port=HTTPS_PORT,
-        debug=DEBUG,
-        use_reloader=False,  # keeps the redirector from starting twice
-        ssl_context=tls,
-        allow_unsafe_werkzeug=True,
-    )

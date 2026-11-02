@@ -1,0 +1,67 @@
+{
+  "run_id": "d983b4aa",
+  "config": {
+    "base_url": "https://127.0.0.1:5000",
+    "clients": 10,
+    "rounds": 3,
+    "outage": 8.0,
+    "fault": "cut",
+    "proxy_port": 5443,
+    "monitor_interval": 1.0
+  },
+  "reconnection": {
+    "target_ms": 5000,
+    "samples": 30,
+    "max_ms": 2360,
+    "p95_ms": 2155,
+    "mean_ms": 996,
+    "never_reconnected": 0,
+    "passed": true
+  },
+  "message_recovery": {
+    "messages_lost": 0,
+    "passed": true
+  },
+  "availability": {
+    "samples": 35,
+    "samples_up": 35,
+    "availability_percent": 100.0,
+    "observed_downtime_s": 0.0,
+    "window_s": 35.4,
+    "allowed_downtime_s_for_window": 0.2,
+    "target_percent": 99.5,
+    "passed": true
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "clients": 10,
+      "reconnected": 10,
+      "max_ms": 1858,
+      "p95_ms": 1858,
+      "mean_ms": 629,
+      "never_reconnected": 0,
+      "messages_lost": 0
+    },
+    {
+      "round": 2,
+      "clients": 10,
+      "reconnected": 10,
+      "max_ms": 1997,
+      "p95_ms": 1997,
+      "mean_ms": 1157,
+      "never_reconnected": 0,
+      "messages_lost": 0
+    },
+    {
+      "round": 3,
+      "clients": 10,
+      "reconnected": 10,
+      "max_ms": 2360,
+      "p95_ms": 2360,
+      "mean_ms": 1202,
+      "never_reconnected": 0,
+      "messages_lost": 0
+    }
+  ]
+}

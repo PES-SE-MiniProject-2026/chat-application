@@ -1,0 +1,47 @@
+{
+  "run_id": "87397e46",
+  "config": {
+    "base_url": "https://127.0.0.1:5000",
+    "clients": 10,
+    "rounds": 1,
+    "outage": 8.0,
+    "fault": "cut",
+    "proxy_port": 5443,
+    "monitor_interval": 1.0
+  },
+  "reconnection": {
+    "target_ms": 5000,
+    "samples": 10,
+    "max_ms": 2297,
+    "p95_ms": 2297,
+    "mean_ms": 1044,
+    "never_reconnected": 0,
+    "passed": true
+  },
+  "message_recovery": {
+    "messages_lost": 0,
+    "passed": true
+  },
+  "availability": {
+    "samples": 12,
+    "samples_up": 12,
+    "availability_percent": 100.0,
+    "observed_downtime_s": 0.0,
+    "window_s": 11.4,
+    "allowed_downtime_s_for_window": 0.1,
+    "target_percent": 99.5,
+    "passed": true
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "clients": 10,
+      "reconnected": 10,
+      "max_ms": 2297,
+      "p95_ms": 2297,
+      "mean_ms": 1044,
+      "never_reconnected": 0,
+      "messages_lost": 0
+    }
+  ]
+}

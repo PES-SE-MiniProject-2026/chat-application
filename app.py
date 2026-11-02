@@ -132,7 +132,19 @@ def verify_ws_token(token):
 
 
 # Only pages served from these HTTPS origins may open a Socket.IO connection.
-socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS)
+# CHAT-NF-003: a silently dropped connection (Wi-Fi loss, sleeping laptop) is
+# only noticed when a ping goes unanswered. The Socket.IO defaults (25 s + 20 s)
+# would leave a dead socket, and the user shown as online, for up to 45 s, so
+# detect a dead peer within PING_INTERVAL + PING_TIMEOUT (10 s by default).
+PING_INTERVAL = int(os.environ.get("CHAT_PING_INTERVAL", "5"))
+PING_TIMEOUT = int(os.environ.get("CHAT_PING_TIMEOUT", "5"))
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS,
+    ping_interval=PING_INTERVAL,
+    ping_timeout=PING_TIMEOUT,
+)
 
 # When running behind nginx or another TLS-terminating proxy, trust its
 # X-Forwarded-Proto header so request.is_secure reflects the client's scheme.
@@ -653,8 +665,31 @@ def index():
         is_admin=user is not None and user["role"] == "admin"
     )
 
+@app.route("/health")
+def health():
+    """Unauthenticated liveness/readiness probe used by availability monitoring
+    (CHAT-NF-003). Returns 200 only if the app can reach its database."""
+    try:
+        with get_db() as db:
+            db.execute("SELECT 1").fetchone()
+    except Exception:
+        app.logger.exception("Health check failed")
+        response = jsonify(status="unavailable")
+        response.status_code = 503
+    else:
+        response = jsonify(status="ok")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# A reconnecting client fetches a fresh token on every attempt, and many
+# clients can share one IP (a campus network, a load-test machine), so the
+# limit must leave room for reconnect storms. Override with CHAT_WS_TOKEN_LIMIT.
+WS_TOKEN_LIMIT = os.environ.get("CHAT_WS_TOKEN_LIMIT", "300 per minute")
+
+
 @app.route("/ws-token")
-@limiter.limit("30 per minute")
+@limiter.limit(WS_TOKEN_LIMIT)
 def ws_token():
     """Issue a short-lived WebSocket handshake token to a logged-in user."""
     user_id = session.get("user_id")
@@ -1154,7 +1189,6 @@ def handle_connect(auth=None):
 
     if user is None or user["account_status"] != "active":
         app.logger.warning("Rejected Socket.IO handshake for unavailable account")
-        raise ConnectionRefusedError("unauthorized")
         raise ConnectionRefusedError("unauthorized")
 
     # Associate this connection with the verified user.
@@ -2238,16 +2272,16 @@ if __name__ == "__main__":
 
     start_http_redirector()
 
-print("Starting Chat Application...")
-print(f"Performance test mode: {PERFORMANCE_TEST_MODE}")
-print(f"HTTP rate limits enabled: {RATE_LIMITS_ENABLED}")
+    print("Starting Chat Application...")
+    print(f"Performance test mode: {PERFORMANCE_TEST_MODE}")
+    print(f"HTTP rate limits enabled: {RATE_LIMITS_ENABLED}")
 
-socketio.run(
-    app,
-    host="127.0.0.1",
-    port=HTTPS_PORT,
-    debug=DEBUG,
-    use_reloader=False,
-    ssl_context=tls,
-    allow_unsafe_werkzeug=True,
-)
+    socketio.run(
+        app,
+        host="127.0.0.1",
+        port=HTTPS_PORT,
+        debug=DEBUG,
+        use_reloader=False,
+        ssl_context=tls,
+        allow_unsafe_werkzeug=True,
+    )

@@ -227,27 +227,65 @@
       // reconnect, so a fresh short-lived token is always sent in the
       // WebSocket handshake. If no token can be obtained, an empty auth
       // object is sent and the server refuses the connection.
+      //
+      // CHAT-NF-003: reconnect automatically, forever, with exponential backoff
+      // capped at 2 s (0.5 s, 1 s, 2 s, 2 s, ...) and a 3 s timeout per attempt,
+      // so a recovered server is rejoined well inside the 5 s target. The old
+      // reconnectionAttempts: 5 gave up for good after roughly 15 s of outage.
+      //
+      // authFailureIsTransient separates "the server said no" (401/403, send the
+      // user to the login page) from "we could not reach /ws-token right now"
+      // (network down, server restarting, 429/5xx). Only the first is a reason to
+      // log out; the second must simply retry.
+      let authFailureIsTransient = false;
+
       const socket = io({
         secure: true,
-        reconnectionAttempts: 5,
+        reconnection: true,
+        reconnectionAttempts: Infinity,
+        reconnectionDelay: 500,
+        reconnectionDelayMax: 2000,
+        randomizationFactor: 0.3,
+        timeout: 3000,
         auth: async (cb) => {
+          authFailureIsTransient = false;
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
           try {
             const res = await fetch("/ws-token", {
               credentials: "same-origin",
-              cache: "no-store"
+              cache: "no-store",
+              signal: controller.signal
             });
 
+            if (res.status === 401 || res.status === 403) {
+              cb({});
+              return;
+            }
+
             if (!res.ok) {
-              throw new Error("unauthorized");
+              authFailureIsTransient = true;
+              cb({});
+              return;
             }
 
             const data = await res.json();
             cb({ token: data.token });
           } catch (err) {
+            authFailureIsTransient = true;
             cb({});
+          } finally {
+            clearTimeout(timer);
           }
         }
       });
+
+      // Reconnect timing, for the reliability test (TC-Rel-01) and for manual
+      // checks: window.reconnectLog holds one entry per outage, in milliseconds.
+      window.reconnectLog = [];
+      let disconnectedAt = null;
+      let hasConnectedBefore = false;
+      let manualRetryTimer = null;
 
       const form = document.getElementById("message-form");
       const input = document.getElementById("message-input");
@@ -521,6 +559,26 @@
       socket.on("connect", () => {
         console.log("Connected to Flask-SocketIO:", socket.id);
         notice.textContent = "";
+
+        if (disconnectedAt !== null) {
+          const outageMs = Math.round(performance.now() - disconnectedAt);
+          window.reconnectLog.push({ outage_ms: outageMs, at: new Date().toISOString() });
+          console.info(`Reconnected after ${outageMs} ms`);
+          disconnectedAt = null;
+        }
+
+        // After an outage the server has a brand-new connection for us: reload
+        // what the screen shows so nothing sent while we were away is missing.
+        // (Messages stored for us while offline are pushed by the server itself.)
+        if (hasConnectedBefore) {
+          socket.emit("load groups");
+          if (selectedGroupId !== null) {
+            socket.emit("load group history", { group_id: selectedGroupId });
+          } else if (recipient.value.trim()) {
+            loadChatHistory(recipient.value);
+          }
+        }
+        hasConnectedBefore = true;
         if (connectionDot) {
           connectionDot.className = "status-dot";
           connectionDot.parentElement.title = "Connected to chat server";
@@ -765,18 +823,31 @@
         }
 
         // The server refuses unauthenticated handshakes with the generic
-        // reason "unauthorized": send the user back to the login page.
-        if (err && err.message === "unauthorized") {
+        // reason "unauthorized". That is only a real logout if /ws-token itself
+        // answered 401/403; if we merely failed to fetch a token (network down,
+        // server restarting, rate limited) keep trying instead of logging out.
+        if (err && err.message === "unauthorized" && !authFailureIsTransient) {
           window.location.href = loginUrl;
           return;
         }
 
         // Generic message only; no technical details shown to the user.
-        notice.textContent =
-          "Secure connection failed. Please refresh or log in again.";
+        notice.textContent = "Connection problem. Reconnecting…";
+
+        // A handshake the server refused is not retried by Socket.IO on its own
+        // (socket.active is false), so schedule the next attempt ourselves.
+        if (!socket.active && manualRetryTimer === null) {
+          manualRetryTimer = setTimeout(() => {
+            manualRetryTimer = null;
+            socket.connect();
+          }, 1000);
+        }
       });
 
       socket.on("disconnect", (reason) => {
+        if (disconnectedAt === null) {
+          disconnectedAt = performance.now();
+        }
         if (connectionDot) {
           connectionDot.className = "status-dot offline";
           connectionDot.parentElement.title = "Disconnected";

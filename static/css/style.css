@@ -41,7 +41,9 @@
   --color-status-read: #16a34a;
 
   /* Typography */
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
   --font-size-xs: 0.75rem;
   --font-size-sm: 0.875rem;
   --font-size-base: 1rem;
@@ -66,12 +68,16 @@
 
   /* Shadows */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
+  --shadow-md:
+    0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg:
+    0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
 }
 
 /* --- Base Reset & Box Sizing --- */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -114,7 +120,8 @@ a:hover {
 }
 
 /* --- Buttons --- */
-button, .btn {
+button,
+.btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -126,7 +133,10 @@ button, .btn {
   border: 1px solid transparent;
   cursor: pointer;
   line-height: 1.25;
-  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .btn-primary {
@@ -188,7 +198,9 @@ button, .btn {
   border-radius: var(--radius-md);
   background-color: var(--color-surface);
   color: var(--color-text-main);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .form-input:focus {
@@ -436,7 +448,9 @@ button, .btn {
   border-radius: var(--radius-md);
   background-color: var(--color-bg);
   color: var(--color-text-main);
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
 }
 
 .recipient-input-wrapper input:focus {
@@ -627,8 +641,14 @@ button, .btn {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Outgoing Message (Right) */
@@ -715,7 +735,9 @@ button, .btn {
   border-radius: var(--radius-md);
   border: 1px solid rgba(0, 0, 0, 0.08);
   background-color: rgba(0, 0, 0, 0.02);
-  transition: transform 0.15s ease, opacity 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
 }
 
 .attachment-image-link:hover .attachment-preview-img {
@@ -789,7 +811,10 @@ button, .btn {
   color: var(--color-text-main);
   text-decoration: none;
   white-space: nowrap;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
 }
 
 .attachment-download-btn:hover {
@@ -913,7 +938,11 @@ button, .btn {
   cursor: pointer;
   flex-shrink: 0;
   box-shadow: var(--shadow-sm);
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.1s ease;
 }
 
 .file-preview-remove:hover {
@@ -945,7 +974,11 @@ button, .btn {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -985,7 +1018,9 @@ button, .btn {
   border-radius: var(--radius-md);
   background-color: var(--color-bg);
   color: var(--color-text-main);
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
 }
 
 #message-input:focus {
@@ -1084,9 +1119,127 @@ button, .btn {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ==========================================
+   GROUP CHAT SECTION
+========================================== */
+
+.group-chat-controls {
+  padding: 18px 24px;
+  background: #ffffff;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.group-chat-controls h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: #172033;
+}
+
+.group-create-form,
+.group-management-controls,
+.group-list-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.group-chat-controls input,
+.group-chat-controls select {
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.group-chat-controls input:focus,
+.group-chat-controls select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+#group-name {
+  flex: 1;
+  min-width: 160px;
+}
+
+#group-members {
+  flex: 2;
+  min-width: 220px;
+}
+
+#group-member-username {
+  flex: 1;
+  min-width: 160px;
+}
+
+#group-list {
+  min-width: 180px;
+}
+
+.group-chat-controls button {
+  min-height: 42px;
+  padding: 9px 16px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #1e293b;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
+}
+
+.group-chat-controls button:hover {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+
+#create-group-button {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+#create-group-button:hover {
+  background: #1d4ed8;
+}
+
+#selected-group-info {
+  padding: 12px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+#selected-group-info h3 {
+  margin-bottom: 5px;
+}
+
+#selected-group-info p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
 }

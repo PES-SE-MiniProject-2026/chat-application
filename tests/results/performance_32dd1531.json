@@ -1,0 +1,43 @@
+{
+    "run_id": "32dd1531",
+    "server": "https://127.0.0.1:5000",
+    "total_users": 100,
+    "connected_clients": 100,
+    "connection_failures": 0,
+    "transient_connection_failures_recovered": 5,
+    "expected_messages": 250,
+    "received_messages": 250,
+    "lost_messages": 0,
+    "delivery_rate_percent": 100.0,
+    "test_duration_seconds": 65.189,
+    "average_latency_ms": 896.56,
+    "median_latency_ms": 340.624,
+    "p95_latency_ms": 2771.921,
+    "p99_latency_ms": 3652.546,
+    "maximum_latency_ms": 3914.28,
+    "target_p95_ms": 200,
+    "chat_errors": [],
+    "connection_retry_details": [
+        {
+            "username": "lt32dd1531_014",
+            "recovered_on_attempt": 2
+        },
+        {
+            "username": "lt32dd1531_063",
+            "recovered_on_attempt": 2
+        },
+        {
+            "username": "lt32dd1531_071",
+            "recovered_on_attempt": 2
+        },
+        {
+            "username": "lt32dd1531_092",
+            "recovered_on_attempt": 2
+        },
+        {
+            "username": "lt32dd1531_095",
+            "recovered_on_attempt": 2
+        }
+    ],
+    "status": "FAIL"
+}

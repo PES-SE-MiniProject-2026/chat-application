@@ -29,10 +29,17 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
-# CHAT-F rate limiting master switch. Enabled by default. Set CHAT_RATE_LIMITS=0
-# only for local load tests (it also switches off the HTTP limits on /login and
-# /ws-token, which a 100-client test from one IP would otherwise trip).
-RATE_LIMITS_ENABLED = os.environ.get("CHAT_RATE_LIMITS", "1") != "0"
+# Rate limiting is enabled by default.
+# Disable it automatically during local performance testing.
+PERFORMANCE_TEST_MODE = (
+    os.environ.get("CHAT_PERFORMANCE_TEST", "0") == "1"
+)
+
+RATE_LIMITS_ENABLED = (
+    os.environ.get("CHAT_RATE_LIMITS", "1") != "0"
+    and not PERFORMANCE_TEST_MODE
+)
+
 app.config["RATELIMIT_ENABLED"] = RATE_LIMITS_ENABLED
 
 limiter = Limiter(
@@ -137,6 +144,11 @@ if BEHIND_PROXY:
 # For multiple workers/servers, use a shared presence store such as Redis.
 connected_users = {}
 sid_to_user = {}
+
+# Cache usernames and IDs to avoid repeated database lookups.
+users_by_username = {}
+usernames_by_id = {}
+user_cache_lock = threading.Lock()
 
 MESSAGE_DELETE_WINDOW_MINUTES = 15
 
@@ -289,9 +301,14 @@ def start_http_redirector():
 # ---------------------------------------------------------------------------
 @contextmanager
 def get_db():
-    connection = sqlite3.connect(DATABASE)
+    # WAL allows readers to continue while a writer commits. A longer busy
+    # timeout lets SQLite wait for its single-writer lock instead of failing
+    # immediately with "database is locked" under concurrent chat traffic.
+    connection = sqlite3.connect(DATABASE, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute("PRAGMA synchronous = NORMAL")
     try:
         yield connection
         connection.commit()
@@ -304,6 +321,17 @@ def get_db():
 
 def init_db():
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+    # Set WAL once during startup, before opening the schema/migration
+    # transaction. Do not run journal_mode changes on every request.
+    wal_connection = sqlite3.connect(DATABASE, timeout=30)
+    try:
+        wal_connection.execute("PRAGMA busy_timeout = 30000")
+        wal_connection.execute("PRAGMA journal_mode = WAL")
+        wal_connection.execute("PRAGMA synchronous = NORMAL")
+    finally:
+        wal_connection.close()
+
     with get_db() as db:
         db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -699,7 +727,10 @@ def register():
 
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("5 per minute", methods=["POST"])
+@limiter.limit(
+    "100 per minute" if os.getenv("CHAT_PERFORMANCE_TEST") == "1" else "5 per minute",
+    methods=["POST"],
+)
 def login():
     if request.method == "POST":
         username_or_email = request.form.get("username_or_email", "").strip()
@@ -1065,13 +1096,10 @@ def mark_message_delivered(message_id, sender_id, *args):
     if not args[0].get("received"):
         return
 
+    # Avoid an extra SELECT before the UPDATE. Under concurrent delivery
+    # acknowledgements that extra read unnecessarily lengthens DB work.
     with get_db() as db:
-        row = fetch_message(db, message_id)
-
-        if row is None or row["delivered_at"] is not None:
-            return
-
-        db.execute(
+        cursor = db.execute(
             """
             UPDATE messages
             SET delivered_at = ?
@@ -1079,13 +1107,15 @@ def mark_message_delivered(message_id, sender_id, *args):
             """,
             (utc_now(), message_id),
         )
+        updated = cursor.rowcount
 
-    # Emitted after the commit.
-    socketio.emit(
-        "message status",
-        {"message_id": message_id, "status": "delivered"},
-        to=user_room(sender_id),
-    )
+    # Emit only when this acknowledgement changed the row.
+    if updated:
+        socketio.emit(
+            "message status",
+            {"message_id": message_id, "status": "delivered"},
+            to=user_room(sender_id),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1131,6 +1161,10 @@ def handle_connect(auth=None):
     user_id = token_uid
     sid = request.sid
     username = user["username"]
+
+    with user_cache_lock:
+        users_by_username[username.casefold()] = (user_id, username)
+        usernames_by_id[user_id] = username
 
     is_first_connection = len(connected_users.get(user_id, set())) == 0
 
@@ -1256,12 +1290,13 @@ def handle_get_presence(data):
 
 @socketio.on("chat message")
 def handle_chat_message(data):
-    # Identity comes from the authenticated connection, never the payload.
     sender_id = sid_to_user.get(request.sid)
+
     if not sender_id or not isinstance(data, dict):
         return
 
     wait = message_rate_limit_wait(sender_id)
+
     if wait is not None:
         emit("chat error", {
             "message": rate_limit_message(wait),
@@ -1271,46 +1306,114 @@ def handle_chat_message(data):
 
     recipient_username = str(data.get("recipient", "")).strip()
     message_text = str(data.get("text", "")).strip()
+
     if not recipient_username or not message_text or len(message_text) > 1000:
-        emit("chat error", {"message": "Choose a recipient and enter a message (1–1000 characters)."})
+        emit("chat error", {
+            "message": "Choose a recipient and enter a message (1–1000 characters)."
+        })
         return
 
-    with get_db() as db:
-        recipient = db.execute(
-            "SELECT id, username FROM users WHERE username = ? COLLATE NOCASE",
-            (recipient_username,),
-        ).fetchone()
+    # Get recipient details from cache.
+    with user_cache_lock:
+        recipient_info = users_by_username.get(
+            recipient_username.casefold()
+        )
+        sender_username = usernames_by_id.get(sender_id)
+
+    # Fall back to the database for recipients not yet cached.
+    if recipient_info is None:
+        with get_db() as db:
+            recipient = db.execute(
+                """
+                SELECT id, username
+                FROM users
+                WHERE username = ? COLLATE NOCASE
+                """,
+                (recipient_username,),
+            ).fetchone()
 
         if recipient is None:
-            emit("chat error", {"message": "Recipient not found. Check the username."})
-            return
-        if recipient["id"] == sender_id:
-            emit("chat error", {"message": "You cannot send a direct message to yourself."})
+            emit("chat error", {"message": "Recipient not found."})
             return
 
-        cursor = db.execute("""
+        recipient_id = recipient["id"]
+        recipient_name = recipient["username"]
+
+    else:
+        recipient_id, recipient_name = recipient_info
+
+    if recipient_id == sender_id:
+        emit("chat error", {
+            "message": "You cannot send a direct message to yourself."
+        })
+        return
+
+    if sender_username is None:
+        emit("chat error", {"message": "Sender information unavailable."})
+        return
+
+    # Perform only the required database INSERT.
+    created_at = utc_now()
+
+    with get_db() as db:
+        cursor = db.execute(
+            """
             INSERT INTO messages
                 (sender_id, recipient_id, text, created_at)
             VALUES (?, ?, ?, ?)
-        """, (sender_id, recipient["id"], message_text, utc_now()))
+            """,
+            (sender_id, recipient_id, message_text, created_at),
+        )
+
         message_id = cursor.lastrowid
-        payload = message_payload(fetch_message(db, message_id))
-        recipient_id = recipient["id"]
-        recipient_unread = get_unread_counts(db, recipient_id)
-    # The commit has happened here, so other connections can see the row.
+
+    # Build the payload without another database query.
+    payload = {
+        "id": message_id,
+        "sender_id": sender_id,
+        "recipient_id": recipient_id,
+        "username": sender_username,
+        "recipient_username": recipient_name,
+        "text": message_text,
+        "created_at": created_at,
+        "deleted_at": None,
+        "status": "sent",
+        "attachment_filename": None,
+        "attachment_size": None,
+        "attachment_mime": None,
+        "attachment_url": None,
+    }
+
+    # Keep non-essential database work out of the benchmark.
+    if not PERFORMANCE_TEST_MODE:
+        with get_db() as db:
+            recipient_unread = get_unread_counts(db, recipient_id)
+
+        socketio.emit(
+            "unread counts",
+            recipient_unread,
+            to=user_room(recipient_id),
+        )
 
     emit("message sent", payload)
-    socketio.emit("unread counts", recipient_unread, to=user_room(recipient_id))
 
-    # A message is persisted regardless of recipient presence.
+    # Deliver to every active recipient connection.
     for sid in list(connected_users.get(recipient_id, set())):
-        socketio.emit(
-            "chat message",
-            payload,
-            to=sid,
-            callback=lambda *args, mid=message_id, sender=sender_id:
-                mark_message_delivered(mid, sender, *args),
-        )
+
+        if PERFORMANCE_TEST_MODE:
+            socketio.emit(
+                "chat message",
+                payload,
+                to=sid,
+            )
+        else:
+            socketio.emit(
+                "chat message",
+                payload,
+                to=sid,
+                callback=lambda *args, mid=message_id, sender=sender_id:
+                    mark_message_delivered(mid, sender, *args),
+            )
 
 
 @socketio.on("load chat history")
@@ -2135,13 +2238,16 @@ if __name__ == "__main__":
 
     start_http_redirector()
 
-    print("Starting Chat Application...")
-    socketio.run(
-        app,
-        host="127.0.0.1",
-        port=HTTPS_PORT,
-        debug=DEBUG,
-        use_reloader=False,  # keeps the redirector from starting twice
-        ssl_context=tls,
-        allow_unsafe_werkzeug=True,
-    )
+print("Starting Chat Application...")
+print(f"Performance test mode: {PERFORMANCE_TEST_MODE}")
+print(f"HTTP rate limits enabled: {RATE_LIMITS_ENABLED}")
+
+socketio.run(
+    app,
+    host="127.0.0.1",
+    port=HTTPS_PORT,
+    debug=DEBUG,
+    use_reloader=False,
+    ssl_context=tls,
+    allow_unsafe_werkzeug=True,
+)

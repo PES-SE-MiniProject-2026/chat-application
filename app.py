@@ -2238,16 +2238,16 @@ if __name__ == "__main__":
 
     start_http_redirector()
 
-print("Starting Chat Application...")
-print(f"Performance test mode: {PERFORMANCE_TEST_MODE}")
-print(f"HTTP rate limits enabled: {RATE_LIMITS_ENABLED}")
+    print("Starting Chat Application...")
+    print(f"Performance test mode: {PERFORMANCE_TEST_MODE}")
+    print(f"HTTP rate limits enabled: {RATE_LIMITS_ENABLED}")
 
-socketio.run(
-    app,
-    host="127.0.0.1",
-    port=HTTPS_PORT,
-    debug=DEBUG,
-    use_reloader=False,
-    ssl_context=tls,
-    allow_unsafe_werkzeug=True,
-)
+    socketio.run(
+        app,
+        host="127.0.0.1",
+        port=HTTPS_PORT,
+        debug=DEBUG,
+        use_reloader=False,
+        ssl_context=tls,
+        allow_unsafe_werkzeug=True,
+    )

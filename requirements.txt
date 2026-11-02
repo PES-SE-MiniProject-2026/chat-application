@@ -2,3 +2,5 @@ Flask
 Flask-SocketIO
 Flask-Limiter
 simple-websocket
+requests
+pytest

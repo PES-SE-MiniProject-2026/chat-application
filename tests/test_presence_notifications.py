@@ -14,10 +14,17 @@ def chat_app(tmp_path, monkeypatch):
     chat.init_db()
     chat.limiter.enabled = False
     chat.app.config["TESTING"] = True
+
     chat.connected_users.clear()
     chat.sid_to_user.clear()
-    return chat, db_file
 
+    with chat.user_cache_lock:
+        chat.users_by_username.clear()
+        chat.usernames_by_id.clear()
+
+    chat.message_rate_limiter.reset()
+
+    return chat, db_file
 
 def create_user(chat_module, username, email):
     c = chat_module.app.test_client()

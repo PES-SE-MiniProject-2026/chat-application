@@ -5,11 +5,17 @@ import sqlite3
 import threading
 import time
 import uuid
+from security import (
+    register_security_handlers,
+    internal_error,
+    request_entity_too_large,
+)
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from math import ceil
 from functools import wraps
+from rate_limiting import SlidingWindowRateLimiter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from flask import (
@@ -26,6 +32,17 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from attachment_utils import (
+    ALLOWED_ATTACHMENT_EXTENSIONS,
+    validate_attachment,
+    sanitize_display_filename,
+)
+from websocket_auth import (
+    WS_TOKEN_MAX_AGE,
+    create_ws_serializer,
+    issue_ws_token as _issue_ws_token,
+    verify_ws_token as _verify_ws_token,
+)
 
 app = Flask(__name__)
 
@@ -99,7 +116,7 @@ UPLOAD_FOLDER = os.environ.get(
     os.path.join(app.root_path, "uploads"),
 )
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
+register_security_handlers(app, lambda: DEBUG)
 # CHAT_DATABASE lets a test run keep the database outside a cloud-synced folder.
 DATABASE = os.environ.get(
     "CHAT_DATABASE",
@@ -108,31 +125,23 @@ DATABASE = os.environ.get(
 
 # ---------------------------------------------------------------------------
 # WebSocket authentication tokens (CHAT-SR-003)
-# ---------------------------------------------------------------------------
-# A short-lived signed token is issued to logged-in users by /ws-token and
-# must be presented in the Socket.IO handshake. The client fetches a fresh
-# token on every connect/reconnect, so a short lifetime is enough.
-WS_TOKEN_MAX_AGE = 60  # seconds
-ws_serializer = URLSafeTimedSerializer(
-    app.config["SECRET_KEY"],
-    salt="chat-ws-auth",
+# Authentication logic is maintained in websocket_auth.py.
+from websocket_auth import (
+    WS_TOKEN_MAX_AGE,
+    create_ws_serializer,
+    issue_ws_token as _issue_ws_token,
+    verify_ws_token as _verify_ws_token,
 )
+
+ws_serializer = create_ws_serializer(app.config["SECRET_KEY"])
 
 
 def issue_ws_token(user_id):
-    return ws_serializer.dumps({"uid": user_id})
+    return _issue_ws_token(user_id, ws_serializer)
 
 
 def verify_ws_token(token):
-    """Return the user id inside a valid, unexpired token, otherwise None."""
-    if not isinstance(token, str) or not token or len(token) > 512:
-        return None
-    try:
-        data = ws_serializer.loads(token, max_age=WS_TOKEN_MAX_AGE)
-    except BadSignature:  # also covers SignatureExpired
-        return None
-    uid = data.get("uid") if isinstance(data, dict) else None
-    return uid if isinstance(uid, int) else None
+    return _verify_ws_token(token, ws_serializer, WS_TOKEN_MAX_AGE)
 
 
 # Only pages served from these HTTPS origins may open a Socket.IO connection.
@@ -224,53 +233,6 @@ MESSAGE_RATE_LIMIT = int(os.environ.get("CHAT_MSG_RATE_LIMIT", "20"))
 MESSAGE_RATE_WINDOW = float(os.environ.get("CHAT_MSG_RATE_WINDOW", "10"))
 
 
-class SlidingWindowRateLimiter:
-    """Thread-safe sliding-window limiter keyed by an arbitrary value.
-
-    Rejected attempts are not recorded, so a user who keeps hammering the
-    send button is allowed again as soon as their oldest accepted message
-    leaves the window. State is in-process; for multiple workers use a
-    shared store such as Redis.
-    """
-
-    SWEEP_THRESHOLD = 1024  # tracked keys before stale ones are purged
-
-    def __init__(self, limit, window_seconds, clock=time.monotonic):
-        self.limit = limit
-        self.window = window_seconds
-        self._clock = clock
-        self._events = {}
-        self._lock = threading.Lock()
-
-    def check(self, key):
-        """Record an attempt. Return (allowed, retry_after_seconds)."""
-        now = self._clock()
-        cutoff = now - self.window
-        with self._lock:
-            if len(self._events) > self.SWEEP_THRESHOLD:
-                self._sweep(cutoff)
-
-            events = self._events.setdefault(key, deque())
-            while events and events[0] <= cutoff:
-                events.popleft()
-
-            if len(events) >= self.limit:
-                return False, max(events[0] + self.window - now, 0.0)
-
-            events.append(now)
-            return True, 0.0
-
-    def reset(self, key=None):
-        with self._lock:
-            if key is None:
-                self._events.clear()
-            else:
-                self._events.pop(key, None)
-
-    def _sweep(self, cutoff):
-        for key in [k for k, ev in self._events.items()
-                    if not ev or ev[-1] <= cutoff]:
-            del self._events[key]
 
 
 message_rate_limiter = SlidingWindowRateLimiter(
@@ -295,41 +257,6 @@ def rate_limit_message(wait_seconds):
         f"Please wait {wait_seconds} {unit} and try again."
     )
 
-
-# ---------------------------------------------------------------------------
-# HTTPS enforcement
-# ---------------------------------------------------------------------------
-@app.before_request
-def enforce_https():
-    """Redirect any plain-HTTP request to HTTPS."""
-    if request.is_secure:
-        return None
-    return redirect(request.url.replace("http://", "https://", 1), code=301)
-
-
-@app.after_request
-def add_security_headers(response):
-    if request.is_secure and not DEBUG:
-        # Tell browsers to use HTTPS only for this site.
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
-
-
-@app.errorhandler(RequestEntityTooLarge)
-@app.errorhandler(413)
-def request_entity_too_large(_error):
-    if request.path.startswith("/upload") or request.is_json or "application/json" in request.headers.get("Accept", ""):
-        return jsonify(error="File exceeds maximum allowed size (5 MiB)."), 413
-    return "File exceeds maximum allowed size (5 MiB).", 413
-
-
-@app.errorhandler(500)
-def internal_error(_error):
-    # Generic message only; details stay in the server log.
-    return "Something went wrong. Please try again later.", 500
 
 
 def start_http_redirector():
@@ -612,87 +539,6 @@ def init_db():
             ON group_messages(group_id, id)
         """)
 
-
-# ---------------------------------------------------------------------------
-# File attachment validation & helpers
-# ---------------------------------------------------------------------------
-ALLOWED_ATTACHMENT_EXTENSIONS = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".pdf": "application/pdf",
-    ".txt": "text/plain",
-}
-
-
-def validate_attachment(file_storage):
-    """Validate uploaded file type, size, extension, and content signatures.
-
-    Returns: (is_valid, error_message, ext, canonical_mime, content_bytes)
-    """
-    if not file_storage or not file_storage.filename:
-        return False, "No file selected.", None, None, None
-
-    filename = file_storage.filename
-    _, ext = os.path.splitext(filename)
-    ext = ext.lower()
-
-    if ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
-        return False, f"Unsupported file type '{ext}'. Allowed types: PNG, JPEG, GIF, WebP, PDF, TXT.", None, None, None
-
-    canonical_mime = ALLOWED_ATTACHMENT_EXTENSIONS[ext]
-
-    content = file_storage.read()
-    if len(content) == 0:
-        return False, "Uploaded file is empty.", None, None, None
-
-    if len(content) > 5 * 1024 * 1024:
-        return False, "File exceeds maximum allowed size (5 MiB).", None, None, None
-
-    # Binary magic bytes & format signature verification
-    if ext == ".png":
-        if not content.startswith(b"\x89PNG\r\n\x1a\n"):
-            return False, "File content does not match PNG signature.", None, None, None
-    elif ext in (".jpg", ".jpeg"):
-        if not content.startswith(b"\xff\xd8\xff"):
-            return False, "File content does not match JPEG signature.", None, None, None
-    elif ext == ".gif":
-        if not (content.startswith(b"GIF87a") or content.startswith(b"GIF89a")):
-            return False, "File content does not match GIF signature.", None, None, None
-    elif ext == ".webp":
-        if len(content) < 12 or not content.startswith(b"RIFF") or content[8:12] != b"WEBP":
-            return False, "File content does not match WebP signature.", None, None, None
-    elif ext == ".pdf":
-        if not content.startswith(b"%PDF-"):
-            return False, "File content does not match PDF signature.", None, None, None
-    elif ext == ".txt":
-        if b"\x00" in content:
-            return False, "Text file contains NUL bytes.", None, None, None
-        try:
-            decoded = content.decode("utf-8")
-        except UnicodeDecodeError:
-            return False, "Text file is not valid UTF-8.", None, None, None
-        for ch in decoded:
-            code = ord(ch)
-            if (code < 32 and code not in (9, 10, 13)) or code == 127:
-                return False, "Text file contains disallowed control characters.", None, None, None
-
-    return True, "", ext, canonical_mime, content
-
-
-def sanitize_display_filename(filename, ext):
-    """Normalize display filename to a safe basename, remove control characters, and cap length."""
-    raw = os.path.basename(filename)
-    clean = re.sub(r"[\x00-\x1f\x7f]", "", raw).strip()
-    safe = secure_filename(clean)
-    if not safe or safe == ext.lstrip("."):
-        safe = f"attachment_{uuid.uuid4().hex[:8]}{ext}"
-    if len(safe) > 200:
-        base, extension = os.path.splitext(safe)
-        safe = base[: 200 - len(extension)] + extension
-    return safe
 
 
 # ---------------------------------------------------------------------------

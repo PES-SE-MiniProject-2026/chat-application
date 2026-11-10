@@ -100,7 +100,11 @@ UPLOAD_FOLDER = os.environ.get(
 )
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-DATABASE = os.path.join(app.root_path, "users.db")
+# CHAT_DATABASE lets a test run keep the database outside a cloud-synced folder.
+DATABASE = os.environ.get(
+    "CHAT_DATABASE",
+    os.path.join(app.root_path, "users.db"),
+)
 
 # ---------------------------------------------------------------------------
 # WebSocket authentication tokens (CHAT-SR-003)
@@ -166,6 +170,50 @@ MESSAGE_DELETE_WINDOW_MINUTES = 15
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Performance diagnostics (only active when CHAT_PERFORMANCE_TEST=1)
+# ---------------------------------------------------------------------------
+# The load test sends a wall-clock "sent_at" with every message. The server
+# records when the handler started and when it queued the delivery, so the
+# latency the test reports can be split into:
+#   inbound_ms  client send  -> server handler start  (client emit, TLS, thread start)
+#   handler_ms  handler start -> delivery about to be emitted (server work)
+#   emit_ms     delivery emit loop (queueing the Socket.IO packets)
+# GET /perf-stats returns percentiles for each; /perf-stats?reset=1 clears them.
+perf_samples = {"inbound_ms": [], "handler_ms": [], "emit_ms": []}
+
+
+def _perf_percentiles(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+
+    def pick(percent):
+        return round(ordered[min(len(ordered) - 1, int(len(ordered) * percent / 100))], 3)
+
+    return {
+        "count": len(ordered),
+        "p50": pick(50),
+        "p95": pick(95),
+        "p99": pick(99),
+        "max": round(ordered[-1], 3),
+    }
+
+
+@app.route("/perf-stats")
+def perf_stats():
+    if not PERFORMANCE_TEST_MODE:
+        return jsonify(error="not found"), 404
+    if request.args.get("reset") == "1":
+        for samples in perf_samples.values():
+            samples.clear()
+        return jsonify(status="reset")
+    return jsonify({
+        name: _perf_percentiles(list(values))
+        for name, values in perf_samples.items()
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +377,68 @@ def get_db():
         raise
     finally:
         connection.close()
+
+
+# ---------------------------------------------------------------------------
+# Shared connection for the message send path
+# ---------------------------------------------------------------------------
+# get_db() opens, configures and closes a new SQLite connection on every call.
+# On Windows that costs several milliseconds, and when many messages arrive at
+# once the connections queue behind SQLite's single-writer lock and its
+# sleep-and-retry busy handler, so the slowest messages waited seconds
+# (tests/db_bench.py on the dev machine: p95 655 ms per-message connections vs
+# 3 ms with one shared connection). The send path (store message, unread count,
+# delivery acknowledgement) therefore uses one long-lived connection behind a
+# lock. Everything else still uses get_db().
+# Set CHAT_SHARED_DB=0 to go back to a new connection per call.
+SHARED_DB_ENABLED = os.environ.get("CHAT_SHARED_DB", "1") != "0"
+_shared_db_lock = threading.Lock()
+_shared_db = {"path": None, "connection": None}
+
+
+def close_shared_db():
+    """Close the shared connection (it is reopened on next use)."""
+    with _shared_db_lock:
+        connection = _shared_db["connection"]
+        _shared_db["connection"] = None
+        _shared_db["path"] = None
+    if connection is not None:
+        connection.close()
+
+
+@contextmanager
+def shared_db():
+    """Like get_db(), but reuses one connection and serialises its users.
+
+    Keep the body short and never open get_db()/shared_db() inside it.
+    """
+    if not SHARED_DB_ENABLED:
+        with get_db() as db:
+            yield db
+        return
+
+    with _shared_db_lock:
+        # Reconnect if DATABASE changed (the tests point it at a temp file).
+        if _shared_db["connection"] is None or _shared_db["path"] != DATABASE:
+            if _shared_db["connection"] is not None:
+                _shared_db["connection"].close()
+            new_connection = sqlite3.connect(
+                DATABASE, timeout=30, check_same_thread=False
+            )
+            new_connection.row_factory = sqlite3.Row
+            new_connection.execute("PRAGMA foreign_keys = ON")
+            new_connection.execute("PRAGMA busy_timeout = 30000")
+            new_connection.execute("PRAGMA synchronous = NORMAL")
+            _shared_db["connection"] = new_connection
+            _shared_db["path"] = DATABASE
+
+        connection = _shared_db["connection"]
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def init_db():
@@ -1133,7 +1243,7 @@ def mark_message_delivered(message_id, sender_id, *args):
 
     # Avoid an extra SELECT before the UPDATE. Under concurrent delivery
     # acknowledgements that extra read unnecessarily lengthens DB work.
-    with get_db() as db:
+    with shared_db() as db:
         cursor = db.execute(
             """
             UPDATE messages
@@ -1324,6 +1434,8 @@ def handle_get_presence(data):
 
 @socketio.on("chat message")
 def handle_chat_message(data):
+    server_in = time.time()            # wall clock, compared with the client's sent_at
+    handler_t0 = time.perf_counter()   # monotonic, for handler duration
     sender_id = sid_to_user.get(request.sid)
 
     if not sender_id or not isinstance(data, dict):
@@ -1389,7 +1501,7 @@ def handle_chat_message(data):
     # Perform only the required database INSERT.
     created_at = utc_now()
 
-    with get_db() as db:
+    with shared_db() as db:
         cursor = db.execute(
             """
             INSERT INTO messages
@@ -1420,7 +1532,7 @@ def handle_chat_message(data):
 
     # Keep non-essential database work out of the benchmark.
     if not PERFORMANCE_TEST_MODE:
-        with get_db() as db:
+        with shared_db() as db:
             recipient_unread = get_unread_counts(db, recipient_id)
 
         socketio.emit(
@@ -1428,6 +1540,19 @@ def handle_chat_message(data):
             recipient_unread,
             to=user_room(recipient_id),
         )
+
+    if PERFORMANCE_TEST_MODE:
+        server_emit = time.time()
+        emit_t0 = time.perf_counter()
+        perf_samples["handler_ms"].append((emit_t0 - handler_t0) * 1000)
+        sent_at = data.get("sent_at")
+        if isinstance(sent_at, (int, float)) and not isinstance(sent_at, bool):
+            perf_samples["inbound_ms"].append((server_in - sent_at) * 1000)
+            payload["_perf"] = {
+                "sent_at": sent_at,
+                "server_in": server_in,
+                "server_emit": server_emit,
+            }
 
     emit("message sent", payload)
 
@@ -1448,6 +1573,9 @@ def handle_chat_message(data):
                 callback=lambda *args, mid=message_id, sender=sender_id:
                     mark_message_delivered(mid, sender, *args),
             )
+
+    if PERFORMANCE_TEST_MODE:
+        perf_samples["emit_ms"].append((time.perf_counter() - emit_t0) * 1000)
 
 
 @socketio.on("load chat history")

@@ -1,0 +1,34 @@
+{
+    "run_id": "bf9dfdf0",
+    "server": "https://127.0.0.1:5000",
+    "total_users": 100,
+    "connected_clients": 100,
+    "connection_failures": 0,
+    "transient_connection_failures_recovered": 0,
+    "expected_messages": 250,
+    "received_messages": 250,
+    "lost_messages": 0,
+    "delivery_rate_percent": 100.0,
+    "test_duration_seconds": 36.976,
+    "average_latency_ms": 49.823,
+    "median_latency_ms": 51.969,
+    "p95_latency_ms": 70.029,
+    "p99_latency_ms": 76.268,
+    "maximum_latency_ms": 77.68,
+    "latency_breakdown_ms": {
+        "client_to_client_stamped_on_entry": {
+            "count": 250,
+            "p50": 51.967,
+            "p95": 70.028,
+            "p99": 76.267,
+            "max": 77.679
+        },
+        "inbound": null,
+        "handler": null,
+        "outbound": null
+    },
+    "target_p95_ms": 200,
+    "chat_errors": [],
+    "connection_retry_details": [],
+    "status": "PASS"
+}

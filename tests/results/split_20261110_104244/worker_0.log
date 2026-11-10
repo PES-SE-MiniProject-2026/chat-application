@@ -1,0 +1,68 @@
+============================================================
+CHAT APPLICATION - PERFORMANCE TEST
+============================================================
+Server: https://127.0.0.1:5000
+Concurrent users: 20
+Messages per pair: 5
+Connection attempts per client: 5
+HTTP authentication attempts: 3
+Test run ID: d13351d4
+
+[1/4] Registering test accounts...
+Registered: 10/20
+Registered: 20/20
+Successfully registered: 20/20
+
+[2/4] Authenticating test accounts...
+Authenticated: 10/20
+Authenticated: 20/20
+Successfully authenticated: 20/20
+
+[3/4] Connecting all 20 WebSocket clients...
+Connection attempts completed: 10/20
+Connection attempts completed: 20/20
+Connected clients: 20/20
+Final connection failures: 0
+Transient failures recovered by retry: 0
+Connected; waiting for the other workers...
+
+[4/4] Sending messages between 10 user pairs...
+Expected messages: 50
+
+============================================================
+PERFORMANCE TEST RESULTS
+============================================================
+run_id: d13351d4
+server: https://127.0.0.1:5000
+total_users: 20
+connected_clients: 20
+connection_failures: 0
+transient_connection_failures_recovered: 0
+expected_messages: 50
+received_messages: 50
+lost_messages: 0
+delivery_rate_percent: 100.0
+test_duration_seconds: 15.972
+average_latency_ms: 1390.812
+median_latency_ms: 664.895
+p95_latency_ms: 4582.867
+p99_latency_ms: 5178.237
+maximum_latency_ms: 5391.367
+target_p95_ms: 200
+status: FAIL
+
+Latency breakdown (ms):
+  client_to_client_stamped_on_entry: {'count': 50, 'p50': 664.89, 'p95': 4582.862, 'p99': 5178.234, 'max': 5391.364}
+  inbound: {'count': 50, 'p50': 14.811, 'p95': 22.63, 'p99': 24.508, 'max': 25.208}
+  handler: {'count': 50, 'p50': 646.206, 'p95': 4564.949, 'p99': 5171.003, 'max': 5381.029}
+  outbound: {'count': 50, 'p50': 1.137, 'p95': 2.267, 'p99': 4.003, 'max': 4.532}
+
+Saved files:
+tests\results\split_20261110_104244\performance_d13351d4.json
+tests\results\split_20261110_104244\performance_d13351d4.csv
+============================================================
+RESULT: FAIL
+============================================================
+
+Cleaning up connections...
+Cleanup completed.

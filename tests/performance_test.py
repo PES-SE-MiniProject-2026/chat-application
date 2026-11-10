@@ -4,8 +4,17 @@
 Run from the project root while app.py is running:
     python tests/performance_test.py
 
-Start the local test server with:
-    set CHAT_RATE_LIMITS=0 && python app.py
+Start the local test server with (PowerShell):
+    $env:CHAT_PERFORMANCE_TEST="1"; python app.py
+
+To take the load generator itself out of the measurement, run it as several
+processes with:  python tests/run_split_perf.py
+
+Each message carries a wall-clock "sent_at"; the server (in performance mode)
+returns its own timestamps, so every latency is split into:
+    inbound_ms   client send   -> server handler start
+    handler_ms   handler start -> server queues the delivery
+    outbound_ms  server queues -> client handler start
 
 The test uses real registration, login, /ws-token, Socket.IO authentication,
 and the application's "chat message" event.
@@ -14,6 +23,7 @@ Delivery is counted only when the recipient receives the message.
 
 import csv
 import json
+import os
 import statistics
 import threading
 import time
@@ -26,10 +36,12 @@ import requests
 import socketio
 import urllib3
 
-BASE_URL = "https://127.0.0.1:5000"
+BASE_URL = os.environ.get("PERF_BASE_URL", "https://127.0.0.1:5000")
 
-TOTAL_USERS = 100
-MESSAGES_PER_PAIR = 5
+# Defaults reproduce the original test (100 users, 50 pairs, 250 messages).
+# The PERF_* variables exist so run_split_perf.py can run several copies.
+TOTAL_USERS = int(os.environ.get("PERF_USERS", "100"))
+MESSAGES_PER_PAIR = int(os.environ.get("PERF_MSGS", "5"))
 PASSWORD = "LoadTest!2026_Secure"
 
 CONNECTION_WORKERS = 10
@@ -38,7 +50,14 @@ HTTP_ATTEMPTS = 3
 
 MESSAGE_TIMEOUT = 60
 TARGET_P95_MS = 200
-SEND_INTERVAL_SECONDS = 0.15
+SEND_INTERVAL_SECONDS = float(os.environ.get("PERF_INTERVAL", "0.15"))
+
+# Set by run_split_perf.py: workers wait here until every worker is connected.
+SYNC_DIR = os.environ.get("PERF_SYNC_DIR")
+RESULT_DIR = Path(os.environ.get("PERF_RESULT_DIR", str(Path("tests") / "results")))
+
+if TOTAL_USERS < 2 or TOTAL_USERS % 2:
+    raise SystemExit("PERF_USERS must be an even number (users are paired).")
 
 RUN_ID = uuid.uuid4().hex[:8]
 PREFIX = f"lt{RUN_ID}"
@@ -208,6 +227,10 @@ def connect_client(account):
         @client.on("chat message")
         def handle_received_message(message):
 
+            # Taken before the lock so waiting for the lock is not counted.
+            received_perf = time.perf_counter()
+            received_wall = time.time()
+
             marker = (
                 message.get("text", "")
                 if isinstance(message, dict)
@@ -225,10 +248,34 @@ def connect_client(account):
                         time.perf_counter() - send_times[marker]
                     ) * 1000
 
-                    results.append({
+                    row = {
                         "message": marker,
-                        "latency_ms": round(latency, 3)
-                    })
+                        # Same definition as before (stamped after the lock).
+                        "latency_ms": round(latency, 3),
+                        # Stamped on handler entry, before any lock wait.
+                        "entry_latency_ms": round(
+                            (received_perf - send_times[marker]) * 1000, 3
+                        ),
+                        "inbound_ms": None,
+                        "handler_ms": None,
+                        "outbound_ms": None,
+                    }
+
+                    stamps = (
+                        message.get("_perf")
+                        if isinstance(message, dict)
+                        else None
+                    )
+
+                    if isinstance(stamps, dict):
+                        try:
+                            row["inbound_ms"] = round((stamps["server_in"] - stamps["sent_at"]) * 1000, 3)
+                            row["handler_ms"] = round((stamps["server_emit"] - stamps["server_in"]) * 1000, 3)
+                            row["outbound_ms"] = round((received_wall - stamps["server_emit"]) * 1000, 3)
+                        except (KeyError, TypeError):
+                            pass
+
+                    results.append(row)
 
                     received_messages.add(marker)
 
@@ -348,7 +395,8 @@ def send_messages(pair_index, usernames):
             "chat message",
             {
                 "recipient": recipient_username,
-                "text": marker
+                "text": marker,
+                "sent_at": time.time()
             }
         )
 
@@ -383,6 +431,61 @@ def percentile(values, percent):
         ordered[lower] * (1 - fraction)
         + ordered[upper] * fraction
     )
+
+
+def summarize(values):
+
+    values = [v for v in values if v is not None]
+
+    if not values:
+        return None
+
+    return {
+        "count": len(values),
+        "p50": round(percentile(values, 50), 3),
+        "p95": round(percentile(values, 95), 3),
+        "p99": round(percentile(values, 99), 3),
+        "max": round(max(values), 3)
+    }
+
+
+# ---------------------------------------------------------
+# START BARRIER (only used by run_split_perf.py)
+# ---------------------------------------------------------
+
+def wait_for_go_signal(timeout=600):
+
+    sync_dir = Path(SYNC_DIR)
+    sync_dir.mkdir(parents=True, exist_ok=True)
+
+    (sync_dir / f"ready_{RUN_ID}").write_text("ready", encoding="utf-8")
+
+    go_file = sync_dir / "go"
+    deadline = time.monotonic() + timeout
+
+    print("Connected; waiting for the other workers...")
+
+    while time.monotonic() < deadline:
+
+        if go_file.exists():
+
+            content = go_file.read_text(encoding="utf-8").strip()
+
+            if content == "abort":
+                raise RuntimeError("Another worker failed; run aborted.")
+
+            try:
+                start_at = float(content)
+            except ValueError:
+                time.sleep(0.05)
+                continue
+
+            time.sleep(max(0.0, start_at - time.time()))
+            return
+
+        time.sleep(0.05)
+
+    raise RuntimeError("Timed out waiting for the go signal.")
 
 
 # ---------------------------------------------------------
@@ -475,7 +578,7 @@ def main():
     # -----------------------------------------------------
 
     print(
-        "\n[3/4] Connecting all 100 WebSocket clients..."
+        f"\n[3/4] Connecting all {TOTAL_USERS} WebSocket clients..."
     )
 
     with ThreadPoolExecutor(
@@ -542,16 +645,20 @@ def main():
             )
 
         raise RuntimeError(
-            "100 WebSocket clients could not be established "
+            f"{TOTAL_USERS} WebSocket clients could not be established "
             "after retries; message test not run."
         )
+
+    if SYNC_DIR:
+
+        wait_for_go_signal()
 
     # -----------------------------------------------------
     # STEP 4: SEND 250 MESSAGES
     # -----------------------------------------------------
 
     print(
-        "\n[4/4] Sending messages between 50 user pairs..."
+        f"\n[4/4] Sending messages between {TOTAL_USERS // 2} user pairs..."
     )
 
     expected_messages = (
@@ -698,6 +805,21 @@ def main():
             3
         ) if latency_values else None,
 
+        "latency_breakdown_ms": {
+            "client_to_client_stamped_on_entry": summarize(
+                [row["entry_latency_ms"] for row in result_rows]
+            ),
+            "inbound": summarize(
+                [row["inbound_ms"] for row in result_rows]
+            ),
+            "handler": summarize(
+                [row["handler_ms"] for row in result_rows]
+            ),
+            "outbound": summarize(
+                [row["outbound_ms"] for row in result_rows]
+            ),
+        },
+
         "target_p95_ms": TARGET_P95_MS,
 
         "chat_errors": errors_snapshot,
@@ -712,9 +834,7 @@ def main():
     # SAVE JSON AND CSV
     # -----------------------------------------------------
 
-    output_dir = (
-        Path("tests") / "results"
-    )
+    output_dir = RESULT_DIR
 
     output_dir.mkdir(
         parents=True,
@@ -746,7 +866,11 @@ def main():
             file,
             fieldnames=[
                 "message",
-                "latency_ms"
+                "latency_ms",
+                "entry_latency_ms",
+                "inbound_ms",
+                "handler_ms",
+                "outbound_ms"
             ]
         )
 
@@ -768,12 +892,19 @@ def main():
 
         if key not in (
             "chat_errors",
-            "connection_retry_details"
+            "connection_retry_details",
+            "latency_breakdown_ms"
         ):
 
             print(
                 f"{key}: {value}"
             )
+
+    print("\nLatency breakdown (ms):")
+
+    for name, stats in report["latency_breakdown_ms"].items():
+
+        print(f"  {name}: {stats}")
 
     if errors_snapshot:
 

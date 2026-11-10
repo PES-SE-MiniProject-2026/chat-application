@@ -14,7 +14,11 @@
       <!-- App Header -->
       <header class="chat-header">
         <div class="brand-section">
-          <div class="brand-icon" aria-hidden="true">&#128172;</div>
+          <div class="brand-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+            </svg>
+          </div>
           <div>
             <h1 class="brand-title">Real-Time Chat</h1>
             <p class="brand-subtitle">Software Engineering Mini-Project</p>
@@ -52,6 +56,10 @@
                 required
                 placeholder="Enter recipient username..."
                 autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                aria-label="Recipient username"
+                autofocus
               />
             </div>
             <span id="recipient-unread-badge" class="unread-badge hidden" title="Unread messages" aria-live="polite"></span>
@@ -122,10 +130,20 @@
         <!-- Missed-Messages Banner (CHAT-F-031) -->
         <div id="missed-messages-banner" class="missed-banner hidden" role="region" aria-label="Missed messages notification">
           <div class="missed-banner-inner">
-            <span class="missed-banner-icon" aria-hidden="true">&#9888;</span>
+            <span class="missed-banner-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+            </span>
             <span id="missed-messages-text" class="missed-banner-text"></span>
           </div>
-          <button type="button" class="missed-banner-close" id="missed-banner-dismiss" aria-label="Dismiss missed messages notification">&times;</button>
+          <button type="button" class="missed-banner-close" id="missed-banner-dismiss" aria-label="Dismiss missed messages notification">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
         </div>
 
         <!-- Feedback & Status Bar -->
@@ -137,7 +155,11 @@
         <!-- Scrollable Messages Area -->
         <div class="messages-container" id="messages-container" role="region" aria-label="Message history">
           <div id="messages-empty" class="empty-state">
-            <div class="empty-state-icon" aria-hidden="true">&#128172;</div>
+            <div class="empty-state-icon" aria-hidden="true">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+            </div>
             <p class="empty-state-title">No messages yet</p>
             <p class="empty-state-text">Enter a recipient username above and send a message to start conversing in real time.</p>
           </div>
@@ -202,6 +224,7 @@
               id="file-input"
               name="file"
               class="sr-only"
+              aria-label="Upload attachment"
               accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.txt"
               tabindex="-1"
             />
@@ -952,7 +975,7 @@
           item.appendChild(bubble);
           messages.appendChild(item);
           return;
-      }
+        }
 
         // Attachment handling (CHAT-F-040)
         const att = message.attachment || (message.attachment_filename ? {
@@ -1325,6 +1348,31 @@
           }
       });
 
+
+      // First-message usability (CHAT-NF-004):
+      // Pressing Enter in the recipient input initiates presence lookup and
+      // directly advances focus to the message composer input.
+      recipient.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          clearTimeout(presenceDebounce);
+          const to = recipient.value.trim();
+          if (!to) {
+            notice.textContent = "Please enter a recipient username.";
+            recipient.focus();
+            return;
+          }
+          if (to.toLowerCase() === currentUsername.toLowerCase()) {
+            notice.textContent = "You cannot send a message to yourself.";
+            recipient.focus();
+            return;
+          }
+          notice.textContent = "";
+          requestPresence(to);
+          loadChatHistory(to);
+          input.focus();
+        }
+      });
 
       recipient.addEventListener("input", () => {
         clearTimeout(presenceDebounce);

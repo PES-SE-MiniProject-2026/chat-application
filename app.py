@@ -5,6 +5,11 @@ import sqlite3
 import threading
 import time
 import uuid
+from security import (
+    register_security_handlers,
+    internal_error,
+    request_entity_too_large,
+)
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -100,7 +105,7 @@ UPLOAD_FOLDER = os.environ.get(
     os.path.join(app.root_path, "uploads"),
 )
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-
+register_security_handlers(app, lambda: DEBUG)
 # CHAT_DATABASE lets a test run keep the database outside a cloud-synced folder.
 DATABASE = os.environ.get(
     "CHAT_DATABASE",
@@ -249,41 +254,6 @@ def rate_limit_message(wait_seconds):
         f"Please wait {wait_seconds} {unit} and try again."
     )
 
-
-# ---------------------------------------------------------------------------
-# HTTPS enforcement
-# ---------------------------------------------------------------------------
-@app.before_request
-def enforce_https():
-    """Redirect any plain-HTTP request to HTTPS."""
-    if request.is_secure:
-        return None
-    return redirect(request.url.replace("http://", "https://", 1), code=301)
-
-
-@app.after_request
-def add_security_headers(response):
-    if request.is_secure and not DEBUG:
-        # Tell browsers to use HTTPS only for this site.
-        response.headers["Strict-Transport-Security"] = (
-            "max-age=31536000; includeSubDomains"
-        )
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    return response
-
-
-@app.errorhandler(RequestEntityTooLarge)
-@app.errorhandler(413)
-def request_entity_too_large(_error):
-    if request.path.startswith("/upload") or request.is_json or "application/json" in request.headers.get("Accept", ""):
-        return jsonify(error="File exceeds maximum allowed size (5 MiB)."), 413
-    return "File exceeds maximum allowed size (5 MiB).", 413
-
-
-@app.errorhandler(500)
-def internal_error(_error):
-    # Generic message only; details stay in the server log.
-    return "Something went wrong. Please try again later.", 500
 
 
 def start_http_redirector():

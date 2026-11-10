@@ -1,0 +1,52 @@
+{
+    "run_id": "8692a1b3",
+    "server": "https://127.0.0.1:5000",
+    "total_users": 20,
+    "connected_clients": 20,
+    "connection_failures": 0,
+    "transient_connection_failures_recovered": 0,
+    "expected_messages": 50,
+    "received_messages": 50,
+    "lost_messages": 0,
+    "delivery_rate_percent": 100.0,
+    "test_duration_seconds": 16.879,
+    "average_latency_ms": 1159.493,
+    "median_latency_ms": 189.037,
+    "p95_latency_ms": 5460.685,
+    "p99_latency_ms": 5876.987,
+    "maximum_latency_ms": 5919.864,
+    "latency_breakdown_ms": {
+        "client_to_client_stamped_on_entry": {
+            "count": 50,
+            "p50": 189.034,
+            "p95": 5460.681,
+            "p99": 5876.983,
+            "max": 5919.861
+        },
+        "inbound": {
+            "count": 50,
+            "p50": 14.578,
+            "p95": 22.542,
+            "p99": 23.652,
+            "max": 24.444
+        },
+        "handler": {
+            "count": 50,
+            "p50": 175.908,
+            "p95": 5442.265,
+            "p99": 5861.427,
+            "max": 5905.022
+        },
+        "outbound": {
+            "count": 50,
+            "p50": 1.075,
+            "p95": 2.221,
+            "p99": 2.537,
+            "max": 2.724
+        }
+    },
+    "target_p95_ms": 200,
+    "chat_errors": [],
+    "connection_retry_details": [],
+    "status": "FAIL"
+}

@@ -37,6 +37,12 @@ from attachment_utils import (
     validate_attachment,
     sanitize_display_filename,
 )
+from websocket_auth import (
+    WS_TOKEN_MAX_AGE,
+    create_ws_serializer,
+    issue_ws_token as _issue_ws_token,
+    verify_ws_token as _verify_ws_token,
+)
 
 app = Flask(__name__)
 
@@ -119,31 +125,23 @@ DATABASE = os.environ.get(
 
 # ---------------------------------------------------------------------------
 # WebSocket authentication tokens (CHAT-SR-003)
-# ---------------------------------------------------------------------------
-# A short-lived signed token is issued to logged-in users by /ws-token and
-# must be presented in the Socket.IO handshake. The client fetches a fresh
-# token on every connect/reconnect, so a short lifetime is enough.
-WS_TOKEN_MAX_AGE = 60  # seconds
-ws_serializer = URLSafeTimedSerializer(
-    app.config["SECRET_KEY"],
-    salt="chat-ws-auth",
+# Authentication logic is maintained in websocket_auth.py.
+from websocket_auth import (
+    WS_TOKEN_MAX_AGE,
+    create_ws_serializer,
+    issue_ws_token as _issue_ws_token,
+    verify_ws_token as _verify_ws_token,
 )
+
+ws_serializer = create_ws_serializer(app.config["SECRET_KEY"])
 
 
 def issue_ws_token(user_id):
-    return ws_serializer.dumps({"uid": user_id})
+    return _issue_ws_token(user_id, ws_serializer)
 
 
 def verify_ws_token(token):
-    """Return the user id inside a valid, unexpired token, otherwise None."""
-    if not isinstance(token, str) or not token or len(token) > 512:
-        return None
-    try:
-        data = ws_serializer.loads(token, max_age=WS_TOKEN_MAX_AGE)
-    except BadSignature:  # also covers SignatureExpired
-        return None
-    uid = data.get("uid") if isinstance(data, dict) else None
-    return uid if isinstance(uid, int) else None
+    return _verify_ws_token(token, ws_serializer, WS_TOKEN_MAX_AGE)
 
 
 # Only pages served from these HTTPS origins may open a Socket.IO connection.

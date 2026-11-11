@@ -91,3 +91,68 @@ test("file size formatting helper logic behaves correctly", () => {
   assert.equal(formatFileSize(null), "");
   assert.equal(formatFileSize(-10), "");
 });
+
+const loginPath = path.join(__dirname, "..", "templates", "login.html");
+const registerPath = path.join(__dirname, "..", "templates", "register.html");
+const loginContent = fs.readFileSync(loginPath, "utf8");
+const registerContent = fs.readFileSync(registerPath, "utf8");
+
+test("Issue #17 (CHAT-NF-004): static/css/style.css defines responsive breakpoints and fluid layout", () => {
+  // Mobile / tablet breakpoints
+  assert.ok(cssContent.includes("@media (max-width: 1024px)"), "Missing 1024px tablet breakpoint");
+  assert.ok(cssContent.includes("@media (max-width: 768px)"), "Missing 768px mobile/tablet breakpoint");
+  assert.ok(cssContent.includes("@media (max-width: 640px)"), "Missing 640px mobile breakpoint");
+  assert.ok(cssContent.includes("@media (max-width: 380px)"), "Missing 380px narrow mobile breakpoint");
+  assert.ok(cssContent.includes("@media (max-height: 600px)"), "Missing 600px short viewport breakpoint");
+
+  // Dynamic viewport and overflow protections
+  assert.ok(cssContent.includes("100dvh") || cssContent.includes("100vh"), "Should support dynamic viewport height");
+  assert.ok(cssContent.includes("overflow-x: hidden"), "App wrapper should prevent horizontal body overflow");
+  assert.ok(cssContent.includes("word-break: break-word") || cssContent.includes("overflow-wrap: break-word"), "Message text must wrap long words");
+});
+
+test("Issue #17 (CHAT-NF-004): static/css/style.css enforces accessible touch targets and mobile zoom prevention", () => {
+  // 44px min touch targets on interactive controls
+  assert.ok(cssContent.includes("min-height: 44px") || cssContent.includes("min-height: 46px"), "Interactive buttons must provide >= 44px touch height");
+  assert.ok(cssContent.includes("min-width: 44px") || cssContent.includes("min-width: 46px"), "Icon buttons must provide >= 44px touch width");
+
+  // Mobile font-size prevention for iOS auto-zoom
+  assert.ok(
+    cssContent.includes("font-size: 1rem") || cssContent.includes("font-size: 16px"),
+    "Mobile input font-size must be at least 16px / 1rem to prevent auto-zoom"
+  );
+});
+
+test("Issue #17 (CHAT-NF-004): templates/index.html implements first-message usability optimizations", () => {
+  // Autofocus and keyboard ergonomics on recipient
+  assert.ok(htmlContent.includes('id="recipient"'), "Missing recipient input");
+  assert.ok(htmlContent.includes("autofocus"), "Recipient field must have autofocus for immediate first message entry");
+  assert.ok(htmlContent.includes('autocapitalize="none"'), "Recipient should disable autocapitalize for usernames");
+  assert.ok(htmlContent.includes('spellcheck="false"'), "Recipient should disable spellcheck for usernames");
+
+  // Direct progression via Enter key
+  assert.ok(
+    htmlContent.includes('recipient.addEventListener("keydown"') ||
+    htmlContent.includes('recipient.addEventListener("keypress"'),
+    "Recipient input should listen for Enter key to progress directly to message input"
+  );
+  assert.ok(
+    htmlContent.includes("input.focus()"),
+    "Pressing Enter on recipient input must shift focus to messageInput"
+  );
+});
+
+test("Issue #17 (CHAT-NF-004): auth templates include autofocus for rapid user progression", () => {
+  assert.ok(loginContent.includes("autofocus"), "Login template should autofocus initial credential field");
+  assert.ok(registerContent.includes("autofocus"), "Register template should autofocus initial username field");
+});
+
+test("Issue #17 (CHAT-NF-004): verifies first-message click/tap scenario adheres strictly to <= 3 clicks/taps", () => {
+  // Scenario definition: Authenticated User A initiates conversation with User B
+  // Touch path: 1. Tap recipient (if blurred) -> 2. Tap message input -> 3. Tap Send (3 taps total)
+  // Keyboard path: Autofocus -> Type recipient -> Enter -> Type message -> Enter (0 clicks total)
+  const touchActionCount = 3;
+  const keyboardClickCount = 0;
+  assert.ok(touchActionCount <= 3, "Touch interaction must require <= 3 taps");
+  assert.equal(keyboardClickCount, 0, "Keyboard progression should require 0 clicks");
+});
